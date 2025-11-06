@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — DEBUG (ultra‑wide, manual) v0.7</title>
+  <title>Сканер штрих-коду — DEBUG (ultra‑wide, manual) v0.8</title>
   <style>
     :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -23,11 +23,12 @@
 <body>
   <header>
     <div>Наведи камеру на штрих‑код (EAN‑13 only) — DEBUG (rear ultra‑wide)</div>
-    <span class="tag" id="tagVer">v0.7-manual-scan</span>
+    <span class="tag" id="tagVer">v0.8-manual-scan</span>
   </header>
   <video id="video" playsinline muted autoplay></video>
 
   <div id="bar">
+    <button id="btnStart" class="primary">▶️ Запустити камеру</button>
     <button id="btnScan" class="primary" disabled>🎯 Сканувати</button>
     <button id="btnTorch" disabled>🔦 Torch</button>
     <button id="btnRestart" disabled>🔁 Restart</button>
@@ -83,7 +84,8 @@
     // ---- UI refs ----
     const video      = document.getElementById('video');
     const statusEl   = document.getElementById('status');
-    const btnScan    = document.getElementById('btnScan');
+    const btnStart  = document.getElementById('btnStart');
+    const btnScan   = document.getElementById('btnScan');
     const btnTorch   = document.getElementById('btnTorch');
     const btnRestart = document.getElementById('btnRestart');
     const cameraList = document.getElementById('cameraList');
@@ -106,6 +108,7 @@
     let watchdogTimer = null;    // стабілізатор
     let sentOnce = false;        // захист від повторного відправлення
     let armed = false;           // ручний режим: зчитувати тільки після натискання
+    let started = false;         // чи запущена камера           // ручний режим: зчитувати тільки після натискання
 
     async function stopAll(){
       try { await reader.reset(); } catch(e){ log("reader.reset error", e); }
@@ -255,9 +258,13 @@
     }
 
     async function startCamera(){
-      setStatus("Запитую дозвіл до камери…");
+      setStatus("Готую камеру…");
       btnRestart.disabled = true; btnTorch.disabled = true; sentOnce = false; btnScan.disabled = true; armed = false;
       try {
+        // 0) чекаємо завантаження ZXing
+        if (!window.ZXing || !ZXing.BrowserMultiFormatReader){
+          log('ZXing not ready, waiting 200ms'); await new Promise(r=>setTimeout(r,200));
+        }
         // 1) Просимо лиш дозвіл — щоб з'явились labels
         let tmp = null;
         try { tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false }); }
@@ -269,10 +276,21 @@
         const { backId } = await enumerateCams();
         if (!backId) throw new Error("Не знайдено відеокамери");
 
-        // 3) Запуск ZXing з constraints
-        await decodeWithDevice(backId);
-
-        btnRestart.disabled = false;
+        // 3) Запуск ZXing з constraints (primary)
+        try {
+          await decodeWithDevice(backId);
+        } catch(e1){
+          log('decodeWithDevice primary failed', e1?.message);
+          // 3b) fallback: просте getUserMedia і decode з videoDevice
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: backId } }, audio:false });
+          video.srcObject = stream; await video.play();
+          currentTrack = stream.getVideoTracks()[0]; updateTrackTags(); setupZoomControl();
+          await new Promise(r=>setTimeout(r,120));
+          await reader.decodeFromVideoDevice(backId, video, ()=>{});
+          log('fallback decodeFromVideoDevice started');
+          btnScan.disabled = false; setStatus('Готово. Наведи камеру і натисни «Сканувати».');
+        }
+        btnRestart.disabled = false; started = true;
       } catch (e) { log("startCamera error", e && e.message); setStatus("Помилка доступу до камери. Перевір HTTPS/дозвіл."); }
     }
 
@@ -303,8 +321,11 @@
 
     window.addEventListener('beforeunload', stopAll);
 
-    // Start
-    (async ()=>{ log("UA:", navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; await startCamera(); })();
+    // Start — тепер камера запускається тільки за кліком (для iOS жест потрібен)
+    (async ()=>{ log("UA:", navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; setStatus('Натисни «Запустити камеру», потім «Сканувати».'); })();
+
+    // Кнопка старту камери
+    btnStart.addEventListener('click', async ()=>{ if(!started){ await startCamera(); }});
   </script>
 </body>
 </html>
