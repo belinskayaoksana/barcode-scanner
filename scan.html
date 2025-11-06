@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — DEBUG (ultra‑wide, manual) v0.8</title>
+  <title>Сканер штрих-коду — DEBUG (ultra‑wide, AUTO) v0.9</title>
   <style>
     :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -11,7 +11,6 @@
     #video{width:100%;height:48vh;object-fit:cover;background:#000}
     #bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#111;flex-wrap:wrap}
     button{padding:8px 12px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
-    button.primary{background:#2b6ef6;border-color:#2b6ef6}
     button:disabled{opacity:.5;cursor:not-allowed}
     #status{padding:8px 16px;color:#ccc;background:#111}
     #cameraList{padding:6px 8px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#fff}
@@ -23,13 +22,11 @@
 <body>
   <header>
     <div>Наведи камеру на штрих‑код (EAN‑13 only) — DEBUG (rear ultra‑wide)</div>
-    <span class="tag" id="tagVer">v0.8-manual-scan</span>
+    <span class="tag" id="tagVer">v0.9-auto</span>
   </header>
   <video id="video" playsinline muted autoplay></video>
 
   <div id="bar">
-    <button id="btnStart" class="primary">▶️ Запустити камеру</button>
-    <button id="btnScan" class="primary" disabled>🎯 Сканувати</button>
     <button id="btnTorch" disabled>🔦 Torch</button>
     <button id="btnRestart" disabled>🔁 Restart</button>
     <select id="cameraList" title="Перемкнути камеру"></select>
@@ -41,15 +38,14 @@
     <span class="tag" id="tagZoom">zoom: n/a</span>
   </div>
 
-  <div id="status">Готую камеру…</div>
+  <div id="status">Ініціалізація…</div>
   <div id="log"></div>
 
   <script src="https://unpkg.com/@zxing/library@latest"></script>
-  <!-- Telegram SDK: обов'язково для tg.sendData/tg.close на iOS/Android -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     // ---- Version ----
-    const VERSION = 'v0.7-manual-scan';
+    const VERSION = 'v0.9-auto';
 
     // ---- Logger ----
     const logEl = document.getElementById('log');
@@ -84,8 +80,6 @@
     // ---- UI refs ----
     const video      = document.getElementById('video');
     const statusEl   = document.getElementById('status');
-    const btnStart  = document.getElementById('btnStart');
-    const btnScan   = document.getElementById('btnScan');
     const btnTorch   = document.getElementById('btnTorch');
     const btnRestart = document.getElementById('btnRestart');
     const cameraList = document.getElementById('cameraList');
@@ -100,15 +94,13 @@
     // ---- ZXing setup ----
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ ZXing.BarcodeFormat.EAN_13 ]);
-    const reader = new ZXing.BrowserMultiFormatReader(hints, 150);
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 120);
 
     let currentTrack = null;
     let stopping = false;
     let chosenBackId = null;     // обраний пристрій
     let watchdogTimer = null;    // стабілізатор
     let sentOnce = false;        // захист від повторного відправлення
-    let armed = false;           // ручний режим: зчитувати тільки після натискання
-    let started = false;         // чи запущена камера           // ручний режим: зчитувати тільки після натискання
 
     async function stopAll(){
       try { await reader.reset(); } catch(e){ log("reader.reset error", e); }
@@ -118,7 +110,6 @@
       video.srcObject = null;
       currentTrack = null;
       btnTorch.disabled = true;
-      btnScan.disabled = true;
       if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
       log("Stopped all tracks");
     }
@@ -165,20 +156,18 @@
 
       await reader.decodeFromConstraints(constraints, video, (result, err) => {
         if (stopping || sentOnce) return;
-        if (!armed) return; // ручний режим: ігноруємо поки не натиснули
         if (result){
-          armed = false; // роззброюємо до наступного кліку
           sentOnce = true;
           const code = String(result.getText()||"").trim();
           const payload = JSON.stringify({ t: 'barcode', fmt: 'EAN_13', code });
           setStatus(`Зчитано: ${code}. Відправляю в бот…`);
-          try { navigator.vibrate && navigator.vibrate(30); } catch(_){ }
+          try { navigator.vibrate && navigator.vibrate(25); } catch(_){ }
           (async ()=>{
             try {
               if (tg && typeof tg.sendData === 'function') {
                 tg.sendData(payload);
                 log("tg.sendData sent", payload);
-                setTimeout(()=>{ try { tg.close && tg.close(); } catch(_){} }, 150);
+                setTimeout(()=>{ try { tg.close && tg.close(); } catch(_){} }, 120);
               } else {
                 log("TG not detected — copy to clipboard fallback");
                 await navigator.clipboard?.writeText?.(code);
@@ -224,8 +213,8 @@
         } catch(e){ log("watchdog error", e); }
       }, 1000);
 
-      // камеру готово — активуємо кнопку
-      btnScan.disabled = false; setStatus('Готово. Наведи камеру і натисни «Сканувати».');
+      setStatus('Наводь штрих‑код у рамку…');
+      btnRestart.disabled = false;
     }
 
     function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl); }
@@ -259,39 +248,33 @@
 
     async function startCamera(){
       setStatus("Готую камеру…");
-      btnRestart.disabled = true; btnTorch.disabled = true; sentOnce = false; btnScan.disabled = true; armed = false;
       try {
         // 0) чекаємо завантаження ZXing
-        if (!window.ZXing || !ZXing.BrowserMultiFormatReader){
-          log('ZXing not ready, waiting 200ms'); await new Promise(r=>setTimeout(r,200));
-        }
-        // 1) Просимо лиш дозвіл — щоб з'явились labels
-        let tmp = null;
-        try { tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false }); }
-        catch { tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
-        tmp.getTracks().forEach(t => t.stop());
-        log("Permission granted");
+        let tries = 0; while ((!window.ZXing || !ZXing.BrowserMultiFormatReader) && tries++ < 10){ await new Promise(r=>setTimeout(r,100)); }
+        // 1) Перше звернення для labels (деяким iOS потрібно)
+        try { const tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio:false }); tmp.getTracks().forEach(t=>t.stop()); } catch(e) { log('probe getUserMedia error', e?.message); }
+        // 2) Вибір камери
+        const { backId } = await enumerateCams(); if (!backId) throw new Error('Не знайдено відеокамери');
 
-        // 2) Enumerate + choose preferred (rear ultra‑wide if є)
-        const { backId } = await enumerateCams();
-        if (!backId) throw new Error("Не знайдено відеокамери");
-
-        // 3) Запуск ZXing з constraints (primary)
-        try {
-          await decodeWithDevice(backId);
-        } catch(e1){
-          log('decodeWithDevice primary failed', e1?.message);
-          // 3b) fallback: просте getUserMedia і decode з videoDevice
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: backId } }, audio:false });
-          video.srcObject = stream; await video.play();
-          currentTrack = stream.getVideoTracks()[0]; updateTrackTags(); setupZoomControl();
-          await new Promise(r=>setTimeout(r,120));
-          await reader.decodeFromVideoDevice(backId, video, ()=>{});
-          log('fallback decodeFromVideoDevice started');
-          btnScan.disabled = false; setStatus('Готово. Наведи камеру і натисни «Сканувати».');
+        // 3) Основний запуск
+        try { await decodeWithDevice(backId); }
+        catch(e1){
+          log('decodeWithDevice failed', e1?.message);
+          // 3b) Fallback: decodeFromVideoDevice
+          try { await reader.decodeFromVideoDevice(backId, video, ()=>{}); log('fallback decodeFromVideoDevice started'); setStatus('Наводь штрих‑код у рамку…'); }
+          catch(e2){
+            log('decodeFromVideoDevice failed', e2?.message);
+            // 3c) Fallback: просто потік відео
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: backId } }, audio:false });
+            video.srcObject = stream; await video.play();
+            currentTrack = stream.getVideoTracks()[0]; updateTrackTags(); setupZoomControl();
+            setStatus('Камера працює, але декодер не стартував. Перезапусти.');
+          }
         }
-        btnRestart.disabled = false; started = true;
-      } catch (e) { log("startCamera error", e && e.message); setStatus("Помилка доступу до камери. Перевір HTTPS/дозвіл."); }
+      } catch (e) {
+        log('startCamera error', e?.message || e);
+        setStatus('Помилка доступу до камери. Перевір HTTPS/дозвіл.');
+      }
     }
 
     // UI events
@@ -313,19 +296,10 @@
       chosenBackId = id; stopping = true; await stopAll(); stopping = false; sentOnce = false; await startCamera();
     });
 
-    btnScan.addEventListener('click', ()=>{
-      armed = true; sentOnce = false; setStatus('Шукаю код… тримай рівно 1–2 сек.');
-      // через 5 секунд автоматично роззброїмо, якщо нічого не знайдено
-      setTimeout(()=>{ if (armed) { armed = false; setStatus('Не знайдено. Спробуй ще раз або підсвіти код.'); } }, 5000);
-    });
-
     window.addEventListener('beforeunload', stopAll);
 
-    // Start — тепер камера запускається тільки за кліком (для iOS жест потрібен)
-    (async ()=>{ log("UA:", navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; setStatus('Натисни «Запустити камеру», потім «Сканувати».'); })();
-
-    // Кнопка старту камери
-    btnStart.addEventListener('click', async ()=>{ if(!started){ await startCamera(); }});
+    // Auto Start
+    (async ()=>{ log("UA:", navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; await startCamera(); })();
   </script>
 </body>
 </html>
