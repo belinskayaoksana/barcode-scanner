@@ -5,13 +5,15 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Сканер штрих-коду</title>
   <style>
+    :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
     header{padding:12px 16px;font-weight:600;background:#111}
-    #video{width:100%;height:calc(100vh - 120px);object-fit:cover;background:#000}
-    #bar{display:flex;gap:8px;padding:10px 16px;background:#111}
+    #video{width:100%;height:calc(100vh - 140px);object-fit:cover;background:#000}
+    #bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#111}
     button{padding:10px 14px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
     #status{padding:10px 16px;color:#ccc;background:#111}
+    #cameraList{margin-left:auto;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#fff}
   </style>
 </head>
 <body>
@@ -20,23 +22,28 @@
   <div id="bar">
     <button id="btnTorch" disabled>🔦 Ліхтарик</button>
     <button id="btnRestart" disabled>🔁 Перезапустити</button>
+    <select id="cameraList" title="Перемкнути камеру"></select>
   </div>
   <div id="status">Готую камеру…</div>
 
+  <!-- ZXing -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
   <script>
+    // --- Telegram WebApp bridge ---
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
     if (tg) tg.expand(); else {
       document.body.insertAdjacentHTML('afterbegin',
         '<div style="position:fixed;top:0;left:0;right:0;background:#b00020;color:#fff;padding:10px 16px;font-weight:600">Відкрий сканер через кнопку в Telegram-боті — інакше відправка в бот не спрацює.</div>');
     }
 
-    const video = document.getElementById('video');
-    const statusEl = document.getElementById('status');
-    const btnTorch = document.getElementById('btnTorch');
-    const btnRestart = document.getElementById('btnRestart');
+    // --- UI refs ---
+    const video     = document.getElementById('video');
+    const statusEl  = document.getElementById('status');
+    const btnTorch  = document.getElementById('btnTorch');
+    const btnRestart= document.getElementById('btnRestart');
+    const cameraList= document.getElementById('cameraList');
 
-    // Налаштування: лише 1D формати + TRY_HARDER
+    // --- ZXing: 1D only + TRY_HARDER ---
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.CODE_128,
@@ -48,69 +55,10 @@
     const reader = new ZXing.BrowserMultiFormatReader(hints, 400);
 
     let currentTrack = null;
-    let stopping = false;
+    let stopping     = false;
 
-    async function startCamera(){
-      statusEl.textContent = "Готую камеру…";
-      btnTorch.disabled = true; btnRestart.disabled = true;
-
-      let stream = null;
-      try {
-        // 1) Спроба жорстко взяти задню камеру
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: "continuous" }] },
-            audio: false
-          });
-        } catch(e1) {
-          // 2) М’який fallback (iOS)
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-              audio: false
-            });
-          } catch(e2) {
-            // 3) Будь-яка доступна
-            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          }
-        }
-
-        video.srcObject = stream;
-        await video.play();
-        currentTrack = stream.getVideoTracks()[0];
-
-        // Torch
-        try {
-          const caps = currentTrack?.getCapabilities?.();
-          if (caps && 'torch' in caps) btnTorch.disabled = false;
-        } catch(_) {}
-
-        // Запуск декодування
-        const devices = await reader.listVideoInputDevices();
-        const back = devices.find(d => /back|rear|environment/i.test(d.label));
-        const deviceId = back ? back.deviceId : (devices[0]?.deviceId || null);
-
-        await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
-          if (stopping) return;
-          if (result){
-            stopping = true;
-            const code = String(result.getText()||"").trim();
-            statusEl.textContent = `Зчитано: ${code}. Відправляю в бот…`;
-            try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
-            stopAll().finally(()=>{
-              if (tg && tg.sendData) tg.sendData(code); // Telegram сам закриє WebApp
-            });
-          }
-        });
-
-        btnRestart.disabled = false;
-        statusEl.textContent = "Наводь штрих-код горизонтально, без бликів.";
-      } catch (e) {
-        console.error(e);
-        statusEl.textContent = "Помилка доступу до камери. Перевір HTTPS та дозвіл.";
-      }
-    }
-
+    // --- Helpers ---
+    function setStatus(msg) { statusEl.textContent = msg; }
     async function stopAll(){
       try { await reader.reset(); } catch(_){}
       try { await video.pause(); } catch(_){}
@@ -118,6 +66,105 @@
       btnTorch.disabled = true;
     }
 
+    async function populateCameraList(){
+      try {
+        const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+        // позначимо "ймовірно тилова"
+        const opts = devs.map((d,i) => {
+          const lbl = d.label || `Камера ${i+1}`;
+          const hint = /back|rear|environment/i.test(lbl) ? " (тилова)" : "";
+          return `<option value="${d.deviceId}">${lbl}${hint}</option>`;
+        }).join("");
+        cameraList.innerHTML = opts;
+        cameraList.style.display = devs.length > 1 ? "block" : "none";
+      } catch(_){}
+    }
+
+    async function useDevice(deviceId){
+      stopping = true;
+      await stopAll();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream; await video.play();
+      currentTrack = stream.getVideoTracks()[0];
+
+      // Torch
+      try {
+        const caps = currentTrack?.getCapabilities?.();
+        if (caps && 'torch' in caps) btnTorch.disabled = false;
+      } catch(_) {}
+
+      await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
+        if (stopping) return;
+        if (result){
+          stopping = true;
+          const code = String(result.getText()||"").trim();
+          setStatus(`Зчитано: ${code}. Відправляю в бот…`);
+          try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
+          stopAll().finally(() => { if (tg && tg.sendData) tg.sendData(code); });
+        }
+      });
+      stopping = false;
+    }
+
+    // --- Основний старт з надійним вибором тилової ---
+    async function startCamera(){
+      setStatus("Готую камеру…");
+      btnTorch.disabled = true; btnRestart.disabled = true;
+
+      let stream = null;
+      try {
+        // КРОК 1: беремо будь-яку камеру (бажано environment), щоб зʼявилися labels
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
+          });
+        } catch (e1) {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+
+        video.srcObject = stream;
+        await video.play();
+        currentTrack = stream.getVideoTracks()[0];
+
+        // КРОК 2: після дозволу список камер уже має labels — вибираємо тилову
+        const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+        let back = devices.find(d => /back|rear|environment/i.test(d.label));
+        if (!back) back = devices[devices.length - 1]; // часто остання — тилова у WebView
+
+        // Якщо знайшли id тилової — перезапускаємо саме з ним
+        if (back && back.deviceId) {
+          stream.getTracks().forEach(t => t.stop());
+          await useDevice(back.deviceId);
+        } else {
+          // fallback: запускаємо декодування на поточному стрімі
+          const list = await reader.listVideoInputDevices();
+          const devId = list[0]?.deviceId || null;
+          await reader.decodeFromVideoDevice(devId, video, (result, err) => {
+            if (stopping) return;
+            if (result){
+              stopping = true;
+              const code = String(result.getText()||"").trim();
+              setStatus(`Зчитано: ${code}. Відправляю в бот…`);
+              try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
+              stopAll().finally(() => { if (tg && tg.sendData) tg.sendData(code); });
+            }
+          });
+        }
+
+        btnRestart.disabled = false;
+        await populateCameraList();
+        setStatus("Наводь штрих-код горизонтально, без бликів.");
+      } catch (e) {
+        console.error(e);
+        setStatus("Помилка доступу до камери. Перевір HTTPS та дозвіл.");
+      }
+    }
+
+    // --- Події UI ---
     btnTorch.addEventListener('click', async () => {
       try{
         const caps = currentTrack?.getCapabilities?.();
@@ -129,12 +176,19 @@
     });
 
     btnRestart.addEventListener('click', async () => {
-      stopping = false;
+      stopping = true;
       await stopAll();
+      stopping = false;
       await startCamera();
     });
 
-    startCamera(); // автостарт
+    cameraList.addEventListener('change', async () => {
+      const id = cameraList.value;
+      if (id) { await useDevice(id); }
+    });
+
+    // --- Автостарт ---
+    startCamera();
   </script>
 </body>
 </html>
