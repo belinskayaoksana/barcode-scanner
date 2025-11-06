@@ -1,36 +1,140 @@
-@dp.message_handler(content_types=["web_app_data"])
-async def on_webapp_data(message: types.Message):
-    code = (message.web_app_data.data or "").strip()
-    if not code:
-        return await message.answer("⚠️ Порожній код. Спробуй ще раз.")
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Сканер штрих-коду</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
+    header{padding:12px 16px;font-weight:600;background:#111}
+    #video{width:100%;height:calc(100vh - 120px);object-fit:cover;background:#000}
+    #bar{display:flex;gap:8px;padding:10px 16px;background:#111}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    #status{padding:10px 16px;color:#ccc;background:#111}
+  </style>
+</head>
+<body>
+  <header>Наведи камеру на штрих-код (EAN-13 / Code-128)</header>
+  <video id="video" playsinline></video>
+  <div id="bar">
+    <button id="btnTorch" disabled>🔦 Ліхтарик</button>
+    <button id="btnRestart" disabled>🔁 Перезапустити</button>
+  </div>
+  <div id="status">Готую камеру…</div>
 
-    # 1) Пишемо в Sheets + шукаємо ТМЦ через Apps Script
-    try:
-        payload = {
-            "code": code,
-            "user_id": message.from_user.id,
-            "username": message.from_user.username or "",
-            "full_name": f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip(),
-            "source": "webapp-single",
+  <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <script>
+    const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+    if (tg) tg.expand(); else {
+      document.body.insertAdjacentHTML('afterbegin',
+        '<div style="position:fixed;top:0;left:0;right:0;background:#b00020;color:#fff;padding:10px 16px;font-weight:600">Відкрий сканер через кнопку в Telegram-боті — інакше відправка в бот не спрацює.</div>');
+    }
+
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('status');
+    const btnTorch = document.getElementById('btnTorch');
+    const btnRestart = document.getElementById('btnRestart');
+
+    // Налаштування: лише 1D формати + TRY_HARDER
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 400);
+
+    let currentTrack = null;
+    let stopping = false;
+
+    async function startCamera(){
+      statusEl.textContent = "Готую камеру…";
+      btnTorch.disabled = true; btnRestart.disabled = true;
+
+      let stream = null;
+      try {
+        // 1) Спроба жорстко взяти задню камеру
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: "continuous" }] },
+            audio: false
+          });
+        } catch(e1) {
+          // 2) М’який fallback (iOS)
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+              audio: false
+            });
+          } catch(e2) {
+            // 3) Будь-яка доступна
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          }
         }
-        r = requests.post(APPSCRIPT_URL, json=payload, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        return await message.answer(f"⚠️ Помилка Apps Script: {e}")
 
-    # 2) Відповідь користувачу
-    if data.get("status") == "ok" and data.get("found"):
-        item = data.get("item", {}) or {}
-        name = item.get("name","")
-        sku = item.get("sku","")
-        storage = item.get("storage","")
-        await message.answer(
-            f"✅ Знайдено\n"
-            f"• Код: {code}\n"
-            f"• Назва: {name}\n"
-            f"• SKU: {sku}\n"
-            f"• Склад: {storage}"
-        )
-    else:
-        await message.answer(f"❌ Не знайдено в довіднику. Код {code} записано у лог.")
+        video.srcObject = stream;
+        await video.play();
+        currentTrack = stream.getVideoTracks()[0];
+
+        // Torch
+        try {
+          const caps = currentTrack?.getCapabilities?.();
+          if (caps && 'torch' in caps) btnTorch.disabled = false;
+        } catch(_) {}
+
+        // Запуск декодування
+        const devices = await reader.listVideoInputDevices();
+        const back = devices.find(d => /back|rear|environment/i.test(d.label));
+        const deviceId = back ? back.deviceId : (devices[0]?.deviceId || null);
+
+        await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
+          if (stopping) return;
+          if (result){
+            stopping = true;
+            const code = String(result.getText()||"").trim();
+            statusEl.textContent = `Зчитано: ${code}. Відправляю в бот…`;
+            try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
+            stopAll().finally(()=>{
+              if (tg && tg.sendData) tg.sendData(code); // Telegram сам закриє WebApp
+            });
+          }
+        });
+
+        btnRestart.disabled = false;
+        statusEl.textContent = "Наводь штрих-код горизонтально, без бликів.";
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = "Помилка доступу до камери. Перевір HTTPS та дозвіл.";
+      }
+    }
+
+    async function stopAll(){
+      try { await reader.reset(); } catch(_){}
+      try { await video.pause(); } catch(_){}
+      if (currentTrack) { try { currentTrack.stop(); } catch(_){ } }
+      btnTorch.disabled = true;
+    }
+
+    btnTorch.addEventListener('click', async () => {
+      try{
+        const caps = currentTrack?.getCapabilities?.();
+        if (caps && 'torch' in caps){
+          const set = currentTrack.getSettings();
+          await currentTrack.applyConstraints({ advanced: [{ torch: !set.torch }] });
+        }
+      }catch(e){ console.warn("Torch not supported", e); }
+    });
+
+    btnRestart.addEventListener('click', async () => {
+      stopping = false;
+      await stopAll();
+      await startCamera();
+    });
+
+    startCamera(); // автостарт
+  </script>
+</body>
+</html>
