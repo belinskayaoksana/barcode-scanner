@@ -39,6 +39,8 @@
   <div id="log"></div>
 
   <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <!-- Telegram SDK: обов'язково для tg.sendData/tg.close на iOS/Android -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     // ---- Logger ----
     const logEl = document.getElementById('log');
@@ -65,7 +67,7 @@
 
     // ---- Telegram bridge ----
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
-    if (tg) { tg.expand(); log("TG WebApp detected"); }
+    if (tg) { tg.expand(); tg.ready && tg.ready(); log("TG WebApp detected", tg.platform, tg.version); }
     else { log("TG WebApp NOT detected — відкрий через кнопку в боті"); }
 
     // ---- UI refs ----
@@ -90,8 +92,10 @@
       ZXing.BarcodeFormat.EAN_8,
       ZXing.BarcodeFormat.UPC_A,
     ]);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    const reader = new ZXing.BrowserMultiFormatReader(hints, 400);
+    // TRY_HARDER робить точніше, але повільніше — забираємо для миттєвості
+    // hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    // зменшуємо інтервал між сканами для швидшого відгуку
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 150);
 
     let currentTrack = null;
     let stopping = false;
@@ -168,33 +172,29 @@
       await reader.decodeFromConstraints(constraints, video, (result, err) => {
         if (stopping || sentOnce) return;
         if (result){
-          sentOnce = true; // блок повторів
-          const code = String(result.getText()||"").trim();
-          setStatus(`Зчитано: ${code}. Відправляю в бот…`);
-          try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
-
-          // м'яка затримка, щоб уникнути "мигця" на деяких пристроях
-          setTimeout(async ()=>{
-            try {
-              if (tg && typeof tg.sendData === 'function') {
-                tg.sendData(code);
-                log("tg.sendData sent");
-                // Закриваємо WebApp, якщо можливо
-                if (typeof tg.close === 'function') {
-                  tg.close();
-                } else {
-                  log("tg.close not available");
-                }
-              } else {
-                log("TG not detected — копіюю в буфер");
-                await navigator.clipboard?.writeText?.(code);
-                alert(`Код: ${code}\n(Скопійовано у буфер обміну)`);
-              }
-            } finally {
-              await stopAll();
+        sentOnce = true;
+        const code = String(result.getText()||"").trim();
+        setStatus(`Зчитано: ${code}. Відправляю в бот…`);
+        try { navigator.vibrate && navigator.vibrate(30); } catch(_){ }
+        // ⚡️ Миттєво відправляємо у Telegram, потім закриваємо
+        (async ()=>{
+          try {
+            if (tg && typeof tg.sendData === 'function') {
+              tg.sendData(code);
+              log("tg.sendData sent");
+              // невелика затримка для iOS перед закриттям
+              setTimeout(()=>{ try { tg.close && tg.close(); } catch(_){} }, 120);
+            } else {
+              log("TG not detected — copy to clipboard fallback");
+              await navigator.clipboard?.writeText?.(code);
+              alert(`Код: ${code}
+(Скопійовано у буфер обміну)`);
             }
-          }, 350);
-        }
+          } finally {
+            await stopAll();
+          }
+        })();
+      }
       });
 
       // отримуємо трек від ZXing
