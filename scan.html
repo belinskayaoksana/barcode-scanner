@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — DEBUG (ultra‑wide, AUTO) v0.9</title>
+  <title>Сканер штрих-коду — DEBUG (ultra‑wide, AUTO) v1.0</title>
   <style>
     :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -22,7 +22,7 @@
 <body>
   <header>
     <div>Наведи камеру на штрих‑код (EAN‑13 only) — DEBUG (rear ultra‑wide)</div>
-    <span class="tag" id="tagVer">v0.9-auto</span>
+    <span class="tag" id="tagVer">v1.0-auto-simplified</span>
   </header>
   <video id="video" playsinline muted autoplay></video>
 
@@ -94,7 +94,7 @@
     // ---- ZXing setup ----
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ ZXing.BarcodeFormat.EAN_13 ]);
-    const reader = new ZXing.BrowserMultiFormatReader(hints, 120);
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 100);
 
     let currentTrack = null;
     let stopping = false;
@@ -143,78 +143,93 @@
       catch(e){ log("zoom error", e); }
     });
 
-    async function decodeWithDevice(deviceId){
-      log("decodeWithDevice", deviceId);
-
+    async function startDecodeSimple(){
+      // iOS-safe: не використовуємо deviceId, лише facingMode
       const constraints = {
         video: {
-          deviceId: { exact: deviceId }, facingMode: { ideal: "environment" },
-          width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 },
-          advanced: [ { focusMode: "continuous" } ]
-        }, audio: false
+          facingMode: { ideal: 'environment' },
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+          advanced: [ { focusMode: 'continuous' } ]
+        },
+        audio: false
       };
 
-      await reader.decodeFromConstraints(constraints, video, (result, err) => {
-        if (stopping || sentOnce) return;
-        if (result){
-          sentOnce = true;
-          const code = String(result.getText()||"").trim();
-          const payload = JSON.stringify({ t: 'barcode', fmt: 'EAN_13', code });
-          setStatus(`Зчитано: ${code}. Відправляю в бот…`);
-          try { navigator.vibrate && navigator.vibrate(25); } catch(_){ }
-          (async ()=>{
-            try {
-              if (tg && typeof tg.sendData === 'function') {
-                tg.sendData(payload);
-                log("tg.sendData sent", payload);
-                setTimeout(()=>{ try { tg.close && tg.close(); } catch(_){} }, 120);
-              } else {
-                log("TG not detected — copy to clipboard fallback");
-                await navigator.clipboard?.writeText?.(code);
-                alert(`Код: ${code}
-(Скопійовано у буфер обміну)`);
-              }
-            } finally { await stopAll(); }
-          })();
-        }
-      });
-
-      // отримуємо трек від ZXing
-      const stream = video.srcObject;
-      currentTrack = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-      updateTrackTags();
-
-      // підстраховка автофокусу + зум
       try {
-        const caps = currentTrack?.getCapabilities?.();
-        if (caps?.focusMode?.includes("continuous")) {
-          await currentTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
-          log("Applied focusMode: continuous");
-        }
-        btnTorch.disabled = !(caps && 'torch' in caps);
-        setupZoomControl();
-        log("Capabilities:", currentTrack.getCapabilities && currentTrack.getCapabilities());
-      } catch(e){ log("capabilities/apply error", e); }
-
-      // tap-to-refocus (невеликий поштовх)
-      video.addEventListener('click', async () => {
-        try { const caps = currentTrack?.getCapabilities?.(); if (caps?.focusMode?.includes("continuous")) { await currentTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); log("Refocus tap applied"); } }
-        catch(e){ log("refocus error", e); }
-      });
-
-      // Watchdog: якщо раптово перемкнулося обличчям уперед — повертаємося на вибрану камеру
-      watchdogTimer = setInterval(async ()=>{
-        try {
-          const s = currentTrack?.getSettings?.() || {}; const preferred = localStorage.getItem("scanner.preferredDeviceId");
-          if ((s.facingMode === "user") && chosenBackId) {
-            log("WATCHDOG: switched to FRONT, restoring preferred", preferred || chosenBackId);
-            stopping = true; await stopAll(); stopping = false; sentOnce = false; await decodeWithDevice(preferred || chosenBackId);
+        await reader.decodeFromConstraints(constraints, video, (result)=>{
+          if (sentOnce) return;
+          if (result){
+            sentOnce = true;
+            const code = String(result.getText()||'').trim();
+            const payload = JSON.stringify({ t:'barcode', fmt:'EAN_13', code });
+            setStatus(`Зчитано: ${code}. Відправляю в бот…`);
+            try { navigator.vibrate && navigator.vibrate(25); } catch(_){}
+            (async ()=>{
+              try{
+                if (tg?.sendData){ tg.sendData(payload); log('tg.sendData sent', payload); setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, 120); }
+                else{ await navigator.clipboard?.writeText?.(code); alert(`Код: ${code}
+(Скопійовано у буфер обміну)`); }
+              } finally { await stopAll(); }
+            })();
           }
-        } catch(e){ log("watchdog error", e); }
-      }, 1000);
+        });
 
-      setStatus('Наводь штрих‑код у рамку…');
-      btnRestart.disabled = false;
+        // on success stream already attached to video
+        const stream = video.srcObject; currentTrack = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+        updateTrackTags();
+        try{
+          const caps = currentTrack?.getCapabilities?.();
+          if (caps?.focusMode?.includes('continuous')) await currentTrack.applyConstraints({ advanced:[{ focusMode:'continuous' }] });
+          btnTorch.disabled = !(caps && 'torch' in caps);
+          setupZoomControl();
+        }catch(e){ log('capabilities/apply error', e); }
+        setStatus('Наводь штрих‑код у рамку…');
+        btnRestart.disabled = false;
+      } catch(e){
+        log('decodeFromConstraints failed', e?.name, e?.message);
+        // Fallback A: прямий потік і декодування з елемента
+        try{
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal:'environment' } }, audio:false });
+          video.srcObject = stream; await video.play();
+          currentTrack = stream.getVideoTracks()[0]; updateTrackTags(); setupZoomControl();
+          setStatus('Камера працює. Шукаю код…');
+          reader.decodeFromVideoElement(video).then(result=>{
+            if (sentOnce) return; sentOnce = true; const code = String(result.getText()||'').trim();
+            const payload = JSON.stringify({ t:'barcode', fmt:'EAN_13', code });
+            if (tg?.sendData){ tg.sendData(payload); setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, 120); }
+            stopAll();
+          }).catch(err=>{ log('decodeFromVideoElement error', err?.message||err); });
+        }catch(e2){
+          log('fallback getUserMedia failed', e2?.name, e2?.message);
+          setStatus('Помилка доступу до камери. Перевір дозвіл у системі iOS: Налаштування > Telegram > Камера.');
+        }
+      }
+    }
+
+    function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl); }
+    function isBackLabel(lbl){ return /back|rear|environment|тилов|задн/i.test(lbl); }
+
+    async function enumerateCams(){
+      try{
+        const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+        log('Devices:', devs.map(d=>({label:d.label, deviceId:d.deviceId})));
+        cameraList.innerHTML = devs.map((d,i)=>`<option value="${d.deviceId}">${d.label||`Камера ${i+1}`}</option>`).join('');
+        cameraList.style.display = devs.length>1 ? 'block' : 'none';
+      }catch(e){ log('enumerate error', e?.message); }
+    }
+
+    async function startCamera(){
+      setStatus('Готую камеру…');
+      try{
+        // невелика затримка, поки підвантажиться zxing у WebView
+        let tries=0; while((!window.ZXing || !ZXing.BrowserMultiFormatReader) && tries++<10){ await new Promise(r=>setTimeout(r,100)); }
+        // iOS: зробити пробний запит для permission промпта
+        try{ const tmp = await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); tmp.getTracks().forEach(t=>t.stop()); log('Permission probe ok'); }
+        catch(e){ log('Permission probe error', e?.name, e?.message); }
+        await enumerateCams();
+        await startDecodeSimple();
+      }catch(e){ log('startCamera error', e?.message||e); setStatus('Помилка доступу до камери.'); }
     }
 
     function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl); }
