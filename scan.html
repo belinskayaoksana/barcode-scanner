@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — DEBUG (ultra‑wide, AUTO) v1.0</title>
+  <title>Сканер штрих-коду — DEBUG (ultra‑wide, AUTO) v1.1</title>
   <style>
     :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -22,9 +22,13 @@
 <body>
   <header>
     <div>Наведи камеру на штрих‑код (EAN‑13 only) — DEBUG (rear ultra‑wide)</div>
-    <span class="tag" id="tagVer">v1.0-auto-simplified</span>
+    <span class="tag" id="tagVer">v1.1-auto-autoplayfix</span>
   </header>
   <video id="video" playsinline muted autoplay></video>
+  <!-- iOS autoplay/touch overlay -->
+  <div id="tapOverlay" style="position:absolute;left:0;right:0;top:56px;height:48vh;display:none;align-items:center;justify-content:center;pointer-events:auto;background:rgba(0,0,0,.35);">
+    <button id="btnTapStart" style="font-size:16px;padding:10px 14px;border-radius:12px;border:1px solid #666;background:#1b1b1b;color:#fff">▶️ Торкнись, щоб увімкнути камеру</button>
+  </div>
 
   <div id="bar">
     <button id="btnTorch" disabled>🔦 Torch</button>
@@ -88,8 +92,12 @@
     const tagTorch   = document.getElementById('tagTorch');
     const zoomEl     = document.getElementById('zoom');
     const tagZoom    = document.getElementById('tagZoom');
+    const tapOverlay = document.getElementById('tapOverlay');
+    const btnTapStart = document.getElementById('btnTapStart');
 
     function setStatus(t){ statusEl.textContent = t; log("STATUS:", t); }
+
+    function showTapOverlay(show){ tapOverlay.style.display = show ? 'flex' : 'none'; }
 
     // ---- ZXing setup ----
     const hints = new Map();
@@ -186,7 +194,31 @@
         }catch(e){ log('capabilities/apply error', e); }
         setStatus('Наводь штрих‑код у рамку…');
         btnRestart.disabled = false;
+        // якщо autoplay заблоковано — покажемо оверлей для жесту
+        setTimeout(()=>{ if (!video.srcObject || video.paused || video.readyState < 2){ log('Autoplay blocked: showing tap overlay'); showTapOverlay(true); } }, 200);
       } catch(e){
+        log('decodeFromConstraints failed', e?.name, e?.message);
+        // Fallback A: прямий потік і декодування з елемента
+        try{
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal:'environment' } }, audio:false });
+          video.srcObject = stream; video.muted = true; video.setAttribute('playsinline','');
+          await video.play().catch(()=>{});
+          currentTrack = stream.getVideoTracks()[0]; updateTrackTags(); setupZoomControl();
+          setStatus('Камера працює. Шукаю код…');
+          // якщо все ще пауза — попросимо жест
+          setTimeout(()=>{ if (video.paused){ log('Video paused after getUserMedia — need user gesture'); showTapOverlay(true); } }, 150);
+          reader.decodeFromVideoElement(video).then(result=>{
+            if (sentOnce) return; sentOnce = true; const code = String(result.getText()||'').trim();
+            const payload = JSON.stringify({ t:'barcode', fmt:'EAN_13', code });
+            if (tg?.sendData){ tg.sendData(payload); setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, 120); }
+            stopAll();
+          }).catch(err=>{ log('decodeFromVideoElement error', err?.message||err); });
+        }catch(e2){
+          log('fallback getUserMedia failed', e2?.name, e2?.message);
+          setStatus('Помилка доступу до камери. Перевір дозвіл у системі iOS: Налаштування > Telegram > Камера.');
+        }
+      }
+    } catch(e){
         log('decodeFromConstraints failed', e?.name, e?.message);
         // Fallback A: прямий потік і декодування з елемента
         try{
@@ -224,6 +256,13 @@
       try{
         // невелика затримка, поки підвантажиться zxing у WebView
         let tries=0; while((!window.ZXing || !ZXing.BrowserMultiFormatReader) && tries++<10){ await new Promise(r=>setTimeout(r,100)); }
+        // iOS: пробний промпт дозволу
+        try{ const tmp = await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); tmp.getTracks().forEach(t=>t.stop()); log('Permission probe ok'); }
+        catch(e){ log('Permission probe error', e?.name, e?.message); }
+        await enumerateCams();
+        await startDecodeSimple();
+      }catch(e){ log('startCamera error', e?.message||e); setStatus('Помилка доступу до камери.'); showTapOverlay(true); }
+    }
         // iOS: зробити пробний запит для permission промпта
         try{ const tmp = await navigator.mediaDevices.getUserMedia({ video:true, audio:false }); tmp.getTracks().forEach(t=>t.stop()); log('Permission probe ok'); }
         catch(e){ log('Permission probe error', e?.name, e?.message); }
@@ -314,7 +353,14 @@
     window.addEventListener('beforeunload', stopAll);
 
     // Auto Start
-    (async ()=>{ log("UA:", navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; await startCamera(); })();
+    (async ()=>{ log('UA:', navigator.userAgent); document.getElementById('tagVer').textContent = VERSION; video.setAttribute('playsinline',''); video.muted = true; await startCamera(); })();
+
+    // Tap overlay handler — даємо явний жест користувача для iOS
+    btnTapStart.addEventListener('click', async ()=>{
+      showTapOverlay(false);
+      if (!video.srcObject) { await startCamera(); }
+      try { await video.play(); } catch(e){ log('manual play error', e?.message||e); }
+    });
   </script>
 </body>
 </html>
