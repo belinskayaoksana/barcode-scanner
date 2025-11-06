@@ -3,72 +3,40 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Batch-сканер штрих-кодів</title>
+  <title>Сканер штрих-коду (одноразовий)</title>
   <style>
-    :root{--pad:12px}
-    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-    header{padding:var(--pad);font-weight:600}
-    #wrap{display:flex;flex-direction:column;height:100vh}
-    #video{width:100%;max-height:60vh;background:#000}
-    #toolbar{display:flex;gap:8px;flex-wrap:wrap;padding:var(--pad)}
-    button{padding:10px 14px;border-radius:10px;border:1px solid #ddd;background:#f6f7f8;cursor:pointer}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
+    header{padding:12px 16px;font-weight:600;background:#111}
+    #video{width:100%;height:calc(100vh - 120px);object-fit:cover;background:#000}
+    #bar{display:flex;gap:8px;padding:10px 16px;background:#111}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
-    #status{padding:var(--pad);color:#555}
-    #list{padding:var(--pad);height:20vh;overflow:auto;border-top:1px solid #eee;font-family:ui-monospace,Consolas,monospace}
-    .ok{color:#087f23}.err{color:#b00020}
-    .chip{display:inline-block;margin:2px 6px 2px 0;padding:3px 8px;border:1px solid #ddd;border-radius:999px;font-size:12px;background:#fafafa}
+    #status{padding:10px 16px;color:#ccc;background:#111}
   </style>
 </head>
 <body>
-  <div id="wrap">
-    <header>Скануйте штрих-коди (Code-128 / EAN-13) — batch режим</header>
-    <video id="video" playsinline></video>
-
-    <div id="toolbar">
-      <button id="btnTorch" disabled>🔦 Ліхтарик</button>
-      <button id="btnPause" disabled>⏸️ Пауза</button>
-      <button id="btnResume" disabled>▶️ Продовжити</button>
-      <button id="btnClear">🗑️ Очистити</button>
-      <button id="btnFinish">✅ Завершити (в бот)</button>
-      <span id="counter" class="chip">0 відскановано</span>
-      <span id="sent" class="chip">0 надіслано</span>
-      <span id="errors" class="chip">0 помилок</span>
-    </div>
-
-    <div id="status">Готую камеру… (відкривай через кнопку в Telegram-боті)</div>
-    <div id="list"></div>
+  <header>Наведи камеру на штрих-код (EAN-13 / Code-128)</header>
+  <video id="video" playsinline></video>
+  <div id="bar">
+    <button id="btnTorch" disabled>🔦 Ліхтарик</button>
+    <button id="btnRestart" disabled>🔁 Перезапустити</button>
   </div>
+  <div id="status">Готую камеру…</div>
 
-  <!-- ZXing -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
   <script>
-    // ===== CONFIG =====
-    const APPSCRIPT_URL = "YOUR_APPSCRIPT_URL_WITH_TOKEN"; // <- заміни на свій exec?token=XYZ
-
-    // Telegram Mini App bridge
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
-    if (tg) tg.expand();
+    if (tg) tg.expand(); else {
+      document.body.insertAdjacentHTML('afterbegin',
+        '<div style="position:fixed;top:0;left:0;right:0;background:#b00020;color:#fff;padding:10px 16px;font-weight:600">Відкрий сканер через кнопку в Telegram-боті — інакше відправка в бот не спрацює.</div>');
+    }
 
     const video = document.getElementById('video');
     const statusEl = document.getElementById('status');
-    const listEl = document.getElementById('list');
     const btnTorch = document.getElementById('btnTorch');
-    const btnPause = document.getElementById('btnPause');
-    const btnResume = document.getElementById('btnResume');
-    const btnClear = document.getElementById('btnClear');
-    const btnFinish = document.getElementById('btnFinish');
-    const counterEl = document.getElementById('counter');
-    const sentEl = document.getElementById('sent');
-    const errorsEl = document.getElementById('errors');
+    const btnRestart = document.getElementById('btnRestart');
 
-    // Дедуп та лічильники
-    const scanned = [];         // усі відскановані (порядок)
-    const seen = new Set();     // для дедуплікації
-    const cooldownMs = 1200;    // ігнорити повтор коду всередині цього вікна
-    const lastSeenAt = new Map();
-    let sentCount = 0, errCount = 0;
-
-    // Налаштування ZXing: 1D only + TRY_HARDER
+    // Параметри пошуку: тільки 1D + TRY_HARDER
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.CODE_128,
@@ -77,75 +45,52 @@
       ZXing.BarcodeFormat.UPC_A,
     ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-
     const reader = new ZXing.BrowserMultiFormatReader(hints, 400);
+
     let currentTrack = null;
-    let paused = false;
+    let stopping = false;
 
-    function uiCounts(){
-      counterEl.textContent = `${scanned.length} відскановано`;
-      sentEl.textContent = `${sentCount} надіслано`;
-      errorsEl.textContent = `${errCount} помилок`;
-    }
-    function addRow(text, cls=""){
-      const div = document.createElement('div');
-      if(cls) div.className = cls;
-      div.textContent = text;
-      listEl.prepend(div);
-    }
+    async function startCamera(){
+      statusEl.textContent = "Готую камеру…";
+      btnTorch.disabled = true; btnRestart.disabled = true;
 
-    // Надсилання напряму у Google Apps Script (швидше, ніж через бота)
-    async function sendToSheet(code){
-      try{
-        const payload = {
-          code,
-          user_id: tg?.initDataUnsafe?.user?.id || "",
-          username: tg?.initDataUnsafe?.user?.username || "",
-          full_name: [tg?.initDataUnsafe?.user?.first_name||"", tg?.initDataUnsafe?.user?.last_name||""].join(" ").trim(),
-          source: "webapp-batch",
-          ts: Date.now()
-        };
-        const resp = await fetch(APPSCRIPT_URL, {
-          method: "POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify(payload),
-        });
-        const data = await resp.json().catch(()=> ({}));
-        if (data.status === "ok"){
-          sentCount++; uiCounts();
-          const tag = data.found ? "✅ знайдено" : "❌ не знайдено";
-          addRow(`${tag}: ${code} ${data.found ? `(${data.item?.name||""})` : ""}`);
-        } else {
-          errCount++; uiCounts();
-          addRow(`⚠️ помилка Apps Script для ${code}`, "err");
-        }
-      }catch(e){
-        errCount++; uiCounts();
-        addRow(`⚠️ помилка мережі для ${code}`, "err");
-        console.error(e);
-      }
-    }
-
-    async function startScanner(){
-      statusEl.textContent = tg ? "Готую камеру…" : "❗ Відкрий сканер через кнопку в Telegram-боті (інакше бот не отримає підсумок).";
-      btnTorch.disabled = true; btnPause.disabled = true; btnResume.disabled = true;
-
+      let stream = null;
       try {
-        // Якісний стрім: тилова камера, HD
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 }, height: { ideal: 720 },
-            advanced: [{ focusMode: "continuous" }]
-          },
-          audio: false
-        });
-        video.srcObject = stream; await video.play();
+        // 1) Жорстко просимо задню камеру у HD
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { exact: "environment" },
+              width: { ideal: 1280 }, height: { ideal: 720 },
+              advanced: [{ focusMode: "continuous" }]
+            },
+            audio: false
+          });
+        } catch (e1) {
+          // 2) М’якший fallback (iOS)
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 }, height: { ideal: 720 }
+              },
+              audio: false
+            });
+          } catch (e2) {
+            // 3) Будь-яка доступна камера
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          }
+        }
+
+        video.srcObject = stream;
+        await video.play();
         currentTrack = stream.getVideoTracks()[0];
 
-        // Torch доступність
-        const caps = currentTrack.getCapabilities?.(); 
-        if (caps && 'torch' in caps) btnTorch.disabled = false;
+        // Torch, якщо підтримується
+        try {
+          const caps = currentTrack?.getCapabilities?.();
+          if (caps && 'torch' in caps) btnTorch.disabled = false;
+        } catch(_) {}
 
         // Запуск декодування
         const devices = await reader.listVideoInputDevices();
@@ -153,45 +98,40 @@
         const deviceId = back ? back.deviceId : (devices[0]?.deviceId || null);
 
         await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
-          if (paused) return;
+          if (stopping) return;
           if (result){
+            stopping = true;
             const code = String(result.getText()||"").trim();
-            const now = Date.now();
-            const last = lastSeenAt.get(code) || 0;
-            if (now - last < cooldownMs) return; // анти-дубль
-            lastSeenAt.set(code, now);
-
-            scanned.push(code);
-            seen.add(code);
-            uiCounts();
-            try { navigator.vibrate && navigator.vibrate(25); } catch(_){}
-
-            // МИТТЄВО шлемо у Google Sheets — камера не закривається
-            if (APPSCRIPT_URL.startsWith("http")) sendToSheet(code);
-            addRow(`📦 ${code}`, "ok");
+            statusEl.textContent = `Зчитано: ${code}. Відправляю в бот…`;
+            try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
+            stopAll().finally(()=>{
+              if (tg && tg.sendData) {
+                tg.sendData(code); // Telegram закриє WebApp автоматично
+              } else {
+                statusEl.textContent = "Відкрий через кнопку в Telegram-боті.";
+              }
+            });
           }
         });
 
-        btnPause.disabled = false;
-        btnResume.disabled = true;
-        statusEl.textContent = "Наводь камеру (тримай код горизонтально, підсвіти при потребі).";
+        btnRestart.disabled = false;
+        statusEl.textContent = "Наводь штрих-код горизонтально, без бликів.";
       } catch (e) {
         console.error(e);
         statusEl.textContent = "Помилка доступу до камери. Перевір HTTPS та дозвіл.";
       }
     }
 
-    async function stopScanner(){
+    async function stopAll(){
       try { await reader.reset(); } catch(_){}
       try { await video.pause(); } catch(_){}
-      try { currentTrack && currentTrack.stop(); } catch(_){}
+      if (currentTrack) { try { currentTrack.stop(); } catch(_){ } }
       btnTorch.disabled = true;
     }
 
-    // КНОПКИ
     btnTorch.addEventListener('click', async () => {
       try{
-        const caps = currentTrack.getCapabilities?.();
+        const caps = currentTrack?.getCapabilities?.();
         if (caps && 'torch' in caps){
           const set = currentTrack.getSettings();
           await currentTrack.applyConstraints({ advanced: [{ torch: !set.torch }] });
@@ -199,35 +139,14 @@
       }catch(e){ console.warn("Torch not supported", e); }
     });
 
-    btnPause.addEventListener('click', () => {
-      paused = true;
-      btnPause.disabled = true; btnResume.disabled = false;
-      statusEl.textContent = "⏸️ Пауза. Натисни «Продовжити», щоб сканувати далі.";
-    });
-
-    btnResume.addEventListener('click', () => {
-      paused = false;
-      btnPause.disabled = false; btnResume.disabled = true;
-      statusEl.textContent = "Продовжуємо. Наводь на код…";
-    });
-
-    btnClear.addEventListener('click', () => {
-      scanned.length = 0; seen.clear(); lastSeenAt.clear();
-      sentCount = 0; errCount = 0; listEl.innerHTML = ""; uiCounts();
-    });
-
-    btnFinish.addEventListener('click', async () => {
-      // надсилаємо ПІДСУМОК у бот одним повідомленням
-      if (tg && tg.sendData){
-        const summary = { mode: "batch", total: scanned.length, unique: seen.size, sent: sentCount, errors: errCount };
-        try { tg.sendData(JSON.stringify(summary)); } catch(_){}
-      }
-      await stopScanner();
-      statusEl.textContent = "Завершено. Можеш закрити вікно.";
+    btnRestart.addEventListener('click', async () => {
+      stopping = false;
+      await stopAll();
+      await startCamera();
     });
 
     // автостарт
-    startScanner();
+    startCamera();
   </script>
 </body>
 </html>
