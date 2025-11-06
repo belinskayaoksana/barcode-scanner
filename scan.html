@@ -26,71 +26,85 @@
     <div id="status">Готую камеру…</div>
   </div>
 
-  <!-- ZXing (читання 1D/2D кодів) -->
+  <!-- ZXing UMD -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
   <script>
-    // інтеграція з Telegram Mini App
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg) tg.expand();
+    const tg = window.Telegram?.WebApp; if (tg) tg.expand();
 
-    const video   = document.getElementById('video');
-    const status  = document.getElementById('status');
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('status');
     const btnTorch = document.getElementById('toggleTorch');
     const btnRestart = document.getElementById('restart');
 
-    const reader = new ZXing.BrowserMultiFormatReader();
-    let currentDeviceId = null;
+    // 1) HINTS: шукаємо тільки 1D-формати + try harder
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 500);
     let currentTrack = null;
     let stopping = false;
 
     async function startScanner(){
-      status.textContent = 'Готую камеру…';
+      statusEl.textContent = 'Готую камеру…';
       btnTorch.disabled = true; btnRestart.disabled = true;
 
       try {
-        // перелік камер і вибір тилової
+        // 2) Просимо HD і тилову камеру
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            // деякі браузери ігнорують, але спробуємо:
+            advanced: [{ focusMode: "continuous" }]
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        // 3) Запускаємо декодування з уже відкритого відео
         const devices = await reader.listVideoInputDevices();
-        if (!devices.length) throw new Error('Камеру не знайдено');
-
         const back = devices.find(d => /back|rear|environment/i.test(d.label));
-        currentDeviceId = (back || devices[0]).deviceId;
+        const deviceId = back ? back.deviceId : (devices[0] && devices[0].deviceId) || null;
 
-        // запуск декодування з відео
-        await reader.decodeFromVideoDevice(currentDeviceId, video, (result, err) => {
+        await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
           if (result && !stopping) {
-            stopping = true;                     // уникнути повторів
+            stopping = true;
             const code = String(result.getText() || '').trim();
-            status.textContent = `Зчитано: ${code}`;
+            statusEl.textContent = `Зчитано: ${code}`;
             try { navigator.vibrate && navigator.vibrate(60); } catch(e){}
-            // повертаємо код у Telegram-бот
-            if (tg) tg.sendData(code);
-            // зупинка сканера
+            tg?.sendData && tg.sendData(code);
             setTimeout(stopScanner, 200);
           }
         });
 
-        // доступ до треку для керування ліхтариком
-        const stream = video.srcObject;
-        currentTrack = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+        currentTrack = stream.getVideoTracks && stream.getVideoTracks()[0];
 
-        // увімкнути кнопку ліхтарика, якщо підтримується
-        if (currentTrack) {
-          const caps = currentTrack.getCapabilities && currentTrack.getCapabilities();
-          if (caps && 'torch' in caps) {
-            btnTorch.disabled = false;
-          }
-        }
+        // 4) Вмикаємо кнопку ліхтарика, якщо підтримується
+        try {
+          const caps = currentTrack?.getCapabilities?.();
+          if (caps && 'torch' in caps) btnTorch.disabled = false;
+        } catch(_) {}
+
         btnRestart.disabled = false;
-        status.textContent = 'Наведіть камеру на штрих-код (тримайте горизонтально для 1D).';
+        statusEl.textContent = 'Наведи камеру: тримай штрих-код горизонтально, без бликів.';
       } catch (e) {
         console.error(e);
-        status.textContent = 'Помилка доступу до камери. Переконайтесь, що є HTTPS і дозволи на камеру.';
+        statusEl.textContent = 'Помилка доступу до камери. Перевір HTTPS та дозвіл.';
       }
     }
 
     async function stopScanner(){
-      try { await reader.reset(); } catch(e){}
-      if (currentTrack) { try { currentTrack.stop(); } catch(e){} }
+      try { await reader.reset(); } catch(_){}
+      try { await video.pause(); } catch(_){}
+      if (currentTrack) { try { currentTrack.stop(); } catch(_){ } }
       btnTorch.disabled = true;
     }
 
@@ -99,9 +113,8 @@
       try {
         const caps = currentTrack.getCapabilities();
         if (caps && 'torch' in caps) {
-          const settings = currentTrack.getSettings();
-          const isOn = settings.torch === true;
-          await currentTrack.applyConstraints({ advanced: [{ torch: !isOn }] });
+          const set = currentTrack.getSettings();
+          await currentTrack.applyConstraints({ advanced: [{ torch: !set.torch }] });
         }
       } catch(e){ console.warn('Torch not supported', e); }
     });
