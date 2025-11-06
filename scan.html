@@ -2,8 +2,8 @@
 <html lang="uk">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Сканер штрих-коду — DEBUG</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>Сканер штрих-коду — DEBUG (ultra‑wide)</title>
   <style>
     :root { color-scheme: dark; }
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -16,20 +16,23 @@
     #cameraList{padding:6px 8px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#fff}
     #log{height:32vh;overflow:auto;background:#0c0c0c;border-top:1px solid #333;font-family:ui-monospace,Consolas,monospace;padding:8px 12px;white-space:pre-wrap}
     .tag{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;border:1px solid #444;border-radius:999px;font-size:12px;background:#1b1b1b}
+    input[type="range"]{accent-color:#fff}
   </style>
 </head>
 <body>
-  <header>Наведи камеру на штрих-код (EAN-13 / Code-128) — DEBUG</header>
+  <header>Наведи камеру на штрих-код (EAN-13 / Code-128) — DEBUG (rear ultra‑wide)</header>
   <video id="video" playsinline muted autoplay></video>
 
   <div id="bar">
     <button id="btnTorch" disabled>🔦 Torch</button>
     <button id="btnRestart" disabled>🔁 Restart</button>
     <select id="cameraList" title="Перемкнути камеру"></select>
+    <input id="zoom" type="range" min="1" max="1" step="0.1" style="width:160px; display:none;">
     <button id="btnDownload">⬇️ Download logs</button>
     <span class="tag" id="tagFacing">facing: ?</span>
     <span class="tag" id="tagRes">res: ?</span>
     <span class="tag" id="tagTorch">torch: ?</span>
+    <span class="tag" id="tagZoom">zoom: n/a</span>
   </div>
 
   <div id="status">Готую камеру…</div>
@@ -41,18 +44,12 @@
     const logEl = document.getElementById('log');
     const logs = [];
     function log(...args){
-      const line = args.map(v => {
-        try { return typeof v === 'string' ? v : JSON.stringify(v); }
-        catch { return String(v); }
-      }).join(' ');
+      const line = args.map(v => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch { return String(v); } }).join(' ');
       const ts = new Date().toISOString().split('T')[1].replace('Z','');
       const msg = `[${ts}] ${line}`;
       logs.push(msg);
       console.log(msg);
-      if (logEl) {
-        logEl.textContent += msg + "\n";
-        logEl.scrollTop = logEl.scrollHeight;
-      }
+      if (logEl) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; }
     }
     window.onerror = (m, s, l, c, e) => log("ERROR", m, s, l, c, e && e.stack);
 
@@ -80,6 +77,8 @@
     const tagFacing  = document.getElementById('tagFacing');
     const tagRes     = document.getElementById('tagRes');
     const tagTorch   = document.getElementById('tagTorch');
+    const zoomEl     = document.getElementById('zoom');
+    const tagZoom    = document.getElementById('tagZoom');
 
     function setStatus(t){ statusEl.textContent = t; log("STATUS:", t); }
 
@@ -96,15 +95,19 @@
 
     let currentTrack = null;
     let stopping = false;
-    let chosenBackId = null;     // deviceId тилової
+    let chosenBackId = null;     // обраний пристрій
     let watchdogTimer = null;    // стабілізатор
+    let sentOnce = false;        // захист від повторного відправлення
 
     async function stopAll(){
       try { await reader.reset(); } catch(e){ log("reader.reset error", e); }
       try { await video.pause(); } catch(e){ log("video.pause error", e); }
-      if (currentTrack) {
-        try { currentTrack.stop(); } catch(e){ log("track.stop error", e); }
+      const stream = video.srcObject;
+      if (stream && stream.getTracks) {
+        stream.getTracks().forEach(t=>{ try{ t.stop(); }catch(_){} });
       }
+      video.srcObject = null;
+      currentTrack = null;
       btnTorch.disabled = true;
       if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
       log("Stopped all tracks");
@@ -120,74 +123,160 @@
       }catch(_){}
     }
 
-    async function decodeWithDevice(deviceId){
-      log("decodeWithDevice", deviceId);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false
-      });
-      video.srcObject = stream;
-      await video.play();
-      currentTrack = stream.getVideoTracks()[0];
-      updateTrackTags();
-
-      // Torch availability
+    function setupZoomControl(){
       try {
         const caps = currentTrack?.getCapabilities?.();
-        btnTorch.disabled = !(caps && 'torch' in caps);
-      } catch(e){ log("caps error", e); }
+        if (caps?.zoom) {
+          zoomEl.min = caps.zoom.min ?? 1;
+          zoomEl.max = caps.zoom.max ?? 5;
+          zoomEl.step = caps.zoom.step ?? 0.1;
+          zoomEl.value = (currentTrack.getSettings().zoom ?? caps.zoom.min ?? 1);
+          zoomEl.style.display = 'inline-block';
+          tagZoom.textContent = `zoom: ${zoomEl.value}`;
+        } else {
+          zoomEl.style.display = 'none';
+          tagZoom.textContent = 'zoom: n/a';
+        }
+      } catch { /* ignore */ }
+    }
 
-      await reader.decodeFromVideoDevice(deviceId, video, (result, err) => {
-        if (stopping) return;
+    zoomEl.addEventListener('input', async () => {
+      try {
+        await currentTrack.applyConstraints({ advanced: [{ zoom: Number(zoomEl.value) }] });
+        tagZoom.textContent = `zoom: ${zoomEl.value}`;
+        log("Zoom set to", zoomEl.value);
+      } catch(e){ log("zoom error", e); }
+    });
+
+    async function decodeWithDevice(deviceId){
+      log("decodeWithDevice", deviceId);
+
+      const constraints = {
+        video: {
+          deviceId: { exact: deviceId },
+          facingMode: { ideal: "environment" },
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+          advanced: [
+            { focusMode: "continuous" }
+          ]
+        },
+        audio: false
+      };
+
+      await reader.decodeFromConstraints(constraints, video, (result, err) => {
+        if (stopping || sentOnce) return;
         if (result){
-          stopping = true;
+          sentOnce = true; // блок повторів
           const code = String(result.getText()||"").trim();
           setStatus(`Зчитано: ${code}. Відправляю в бот…`);
           try { navigator.vibrate && navigator.vibrate(40); } catch(_){}
-          stopAll().finally(()=> { if (tg && tg.sendData) tg.sendData(code); });
+
+          // м'яка затримка, щоб уникнути "мигця" на деяких пристроях
+          setTimeout(async ()=>{
+            try {
+              if (tg && typeof tg.sendData === 'function') {
+                tg.sendData(code);
+                log("tg.sendData sent");
+                // Закриваємо WebApp, якщо можливо
+                if (typeof tg.close === 'function') {
+                  tg.close();
+                } else {
+                  log("tg.close not available");
+                }
+              } else {
+                log("TG not detected — копіюю в буфер");
+                await navigator.clipboard?.writeText?.(code);
+                alert(`Код: ${code}\n(Скопійовано у буфер обміну)`);
+              }
+            } finally {
+              await stopAll();
+            }
+          }, 350);
         }
       });
 
-      // ---- Watchdog: кожну секунду перевіряємо, чи не “перекинуло” ----
+      // отримуємо трек від ZXing
+      const stream = video.srcObject;
+      currentTrack = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+      updateTrackTags();
+
+      // підстраховка автофокусу + зум
+      try {
+        const caps = currentTrack?.getCapabilities?.();
+        if (caps?.focusMode?.includes("continuous")) {
+          await currentTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          log("Applied focusMode: continuous");
+        }
+        btnTorch.disabled = !(caps && 'torch' in caps);
+        setupZoomControl();
+        log("Capabilities:", currentTrack.getCapabilities && currentTrack.getCapabilities());
+      } catch(e){ log("capabilities/apply error", e); }
+
+      // tap-to-refocus
+      video.addEventListener('click', async () => {
+        try {
+          const caps = currentTrack?.getCapabilities?.();
+          if (caps?.focusMode?.includes("continuous")){
+            await currentTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+            log("Refocus tap applied");
+          }
+        } catch(e){ log("refocus error", e); }
+      });
+
+      // Watchdog: якщо раптово перемкнулося обличчям уперед — повертаємося на вибрану камеру
       watchdogTimer = setInterval(async ()=>{
         try {
           const s = currentTrack?.getSettings?.() || {};
-          // якщо facingMode став "user" або змінився track.label — повертаємось на chosenBackId
+          const preferred = localStorage.getItem("scanner.preferredDeviceId");
           if ((s.facingMode === "user") && chosenBackId) {
-            log("WATCHDOG detected switch to FRONT; re-binding back deviceId", chosenBackId, s);
-            stopping = true;
-            await stopAll();
-            stopping = false;
-            await decodeWithDevice(chosenBackId);
+            log("WATCHDOG: switched to FRONT, restoring preferred", preferred || chosenBackId);
+            stopping = true; await stopAll(); stopping = false; sentOnce = false;
+            await decodeWithDevice(preferred || chosenBackId);
           }
         } catch(e){ log("watchdog error", e); }
       }, 1000);
     }
 
+    function isUltraWideLabel(lbl){
+      return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl);
+    }
+    function isBackLabel(lbl){
+      return /back|rear|environment|тилов|задн/i.test(lbl);
+    }
+
     async function enumerateCams(){
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
       log("Devices:", devs.map(d => ({label:d.label, deviceId:d.deviceId, groupId:d.groupId})));
+
       // Populate select
       cameraList.innerHTML = devs.map((d,i)=>{
         const lbl = d.label || `Камера ${i+1}`;
-        const hint = /back|rear|environment/i.test(lbl) ? " (тилова)" : "";
+        const tags = [ isUltraWideLabel(lbl) ? 'ultra‑wide' : '', isBackLabel(lbl) ? 'back' : '' ].filter(Boolean).join(', ');
+        const hint = tags ? ` (${tags})` : '';
         return `<option value="${d.deviceId}">${lbl}${hint}</option>`;
       }).join("");
       cameraList.style.display = devs.length > 1 ? "block" : "none";
 
-      // Heuristics for back camera
-      let back = devs.find(d => /back|rear|environment/i.test(d.label));
-      if (!back && devs.length) back = devs[devs.length - 1]; // fallback
-      chosenBackId = back ? back.deviceId : (devs[0] && devs[0].deviceId);
-      log("Chosen back deviceId:", chosenBackId, "label:", back && back.label);
+      // Preference order: savedId -> rear ultra‑wide -> any rear -> last
+      const savedId = localStorage.getItem("scanner.preferredDeviceId");
+      let preferred = devs.find(d => d.deviceId === savedId)
+                  || devs.find(d => isBackLabel(d.label) && isUltraWideLabel(d.label))
+                  || devs.find(d => isBackLabel(d.label))
+                  || devs[devs.length - 1];
+
+      chosenBackId = preferred ? preferred.deviceId : (devs[0] && devs[0].deviceId);
+      log("Chosen deviceId:", chosenBackId, "label:", preferred && preferred.label);
+      if (chosenBackId) cameraList.value = chosenBackId;
       return {devs, backId: chosenBackId};
     }
 
     async function startCamera(){
       setStatus("Запитую дозвіл до камери…");
-      btnRestart.disabled = true; btnTorch.disabled = true;
+      btnRestart.disabled = true; btnTorch.disabled = true; sentOnce = false;
       try {
-        // 1) Лише permission — щоб зʼявились labels (нічого не показуємо)
+        // 1) Просимо лиш дозвіл — щоб з'явились labels
         let tmp = null;
         try {
           tmp = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
@@ -197,11 +286,11 @@
         tmp.getTracks().forEach(t => t.stop());
         log("Permission granted");
 
-        // 2) Enumerate + choose back
+        // 2) Enumerate + choose preferred (rear ultra‑wide if є)
         const { backId } = await enumerateCams();
         if (!backId) throw new Error("Не знайдено відеокамери");
 
-        // 3) Start decoding with BACK only
+        // 3) Запуск ZXing з constraints
         await decodeWithDevice(backId);
 
         btnRestart.disabled = false;
@@ -213,7 +302,7 @@
     }
 
     // UI events
-    btnTorch.addEventListener('click', async () => {
+    document.getElementById('btnTorch').addEventListener('click', async () => {
       try{
         const caps = currentTrack?.getCapabilities?.();
         if (caps && 'torch' in caps){
@@ -226,27 +315,24 @@
       }catch(e){ log("Torch error", e); }
     });
 
-    btnRestart.addEventListener('click', async () => {
-      stopping = true;
-      await stopAll();
-      stopping = false;
-      await startCamera();
+    document.getElementById('btnRestart').addEventListener('click', async () => {
+      stopping = true; await stopAll(); stopping = false; sentOnce = false; await startCamera();
     });
 
     cameraList.addEventListener('change', async () => {
       const id = cameraList.value;
       if (!id) return;
+      localStorage.setItem("scanner.preferredDeviceId", id);
       log("Manual camera switch to", id);
-      chosenBackId = id; // тепер це — “цільовий” пристрій для watchdog
-      stopping = true;
-      await stopAll();
-      stopping = false;
-      await decodeWithDevice(id);
+      chosenBackId = id;
+      stopping = true; await stopAll(); stopping = false; sentOnce = false; await decodeWithDevice(id);
     });
+
+    window.addEventListener('beforeunload', stopAll);
 
     // Start
     (async ()=>{
-      // Для диференціації платформи в логах
+      // Для діагностики платформи
       log("UA:", navigator.userAgent);
       await startCamera();
     })();
