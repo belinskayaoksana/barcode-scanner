@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — EAN-13 (ultra-wide, AUTO) v1.2</title>
+  <title>Сканер штрих-коду — EAN-13 / EAN-8 / UPC-A / CODE-128 (ultra-wide, AUTO) v1.3</title>
   <style>
     :root{color-scheme:dark}
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -17,14 +17,16 @@
     #log{height:32vh;overflow:auto;background:#0c0c0c;border-top:1px solid #333;font-family:ui-monospace,Consolas,monospace;padding:8px 12px;white-space:pre-wrap}
     .tag{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;border:1px solid #444;border-radius:999px;font-size:12px;background:#1b1b1b}
     input[type="range"]{accent-color:#fff}
+    #lastCode{position:absolute;left:0;right:0;top:8px;text-align:center;font:600 18px/1.2 system-ui;color:#0f0;text-shadow:0 0 6px #000}
   </style>
 </head>
 <body>
   <header>
-    <div>Наведи камеру на штрих-код (EAN-13 only) — DEBUG (rear ultra-wide)</div>
-    <span class="tag" id="tagVer">v1.2</span>
+    <div>Наведи камеру на штрих-код — DEBUG (rear ultra-wide)</div>
+    <span class="tag" id="tagVer">v1.3</span>
   </header>
 
+  <div id="lastCode"></div>
   <video id="video" playsinline muted autoplay></video>
 
   <!-- iOS autoplay/touch overlay -->
@@ -47,11 +49,12 @@
   <div id="status">Ініціалізація…</div>
   <div id="log"></div>
 
-  <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <!-- Фіксована версія ZXing (umd) -->
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     // ---- Version ----
-    const VERSION = 'v1.2';
+    const VERSION = 'v1.3';
 
     // ---- Logger ----
     const logEl = document.getElementById('log');
@@ -93,15 +96,26 @@
     const tagZoom     = document.getElementById('tagZoom');
     const tapOverlay  = document.getElementById('tapOverlay');
     const btnTapStart = document.getElementById('btnTapStart');
+    const lastCodeEl  = document.getElementById('lastCode');
 
     function setStatus(t){ statusEl.textContent = t; log("STATUS:", t); }
     function showTapOverlay(show){ tapOverlay.style.display = show ? 'flex' : 'none'; }
+    function showHit(code){
+      lastCodeEl.textContent = `✓ ${code}`;
+      lastCodeEl.style.color = '#0f0';
+      setTimeout(()=> lastCodeEl.textContent = '', 2500);
+    }
 
-    // ---- ZXing setup (EAN-13 + try harder) ----
+    // ---- ZXing setup (multi-format + try harder) ----
     const hints = new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ ZXing.BarcodeFormat.EAN_13 ]);
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,
+      ZXing.BarcodeFormat.CODE_128
+    ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    const reader = new ZXing.BrowserMultiFormatReader(hints, 150);
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 300);
 
     let currentTrack = null;
     let chosenBackId = null;
@@ -171,6 +185,23 @@
       return {devs, backId: chosenBackId};
     }
 
+    async function tuneConstraintsForiOS(){
+      try {
+        const caps = currentTrack?.getCapabilities?.();
+        if (!caps) return;
+        // Початковий зум для кращого зчитування
+        if (caps.zoom) {
+          const mid = Math.min(caps.zoom.max || 2, Math.max(caps.zoom.min || 1, 2));
+          await currentTrack.applyConstraints({ advanced: [{ zoom: mid }] });
+          tagZoom.textContent = `zoom: ${mid}`;
+        }
+        // Безперервний автофокус
+        if (caps.focusMode?.includes?.('continuous')) {
+          await currentTrack.applyConstraints({ advanced:[{ focusMode:'continuous' }] });
+        }
+      } catch(e){ log('constraints tune error', e?.message); }
+    }
+
     async function decodeWithDevice(deviceId){
       setStatus('Запускаю декодер…');
       const constraints = {
@@ -185,33 +216,50 @@
         audio: false
       };
 
-      // Запуск через decodeFromConstraints для кращої сумісності
-      await reader.decodeFromConstraints(constraints, video, (result, err) => {
+      // 1) Старт декодування БЕЗ await, з логами помилок:
+      reader.decodeFromConstraints(constraints, video, (result, err) => {
         if (sentOnce) return;
         if (result){
-          sentOnce = true;
           const code = String(result.getText()||'').trim();
-          handleCode(code);
+          const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
+          if (/^[0-9A-Za-z\-]{4,}$/.test(code)) {
+            sentOnce = true;
+            showHit(code);
+            handleCode(code, fmt);
+          } else {
+            log('decoded but unexpected format/value:', code);
+          }
+        } else if (err) {
+          // NotFound — нормальний флоу; інші логуй
+          if (!(err instanceof ZXing.NotFoundException)) {
+            log('decode error:', err?.name || err);
+          }
         }
       });
 
-      const stream = video.srcObject;
-      currentTrack = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-      updateTrackTags();
-      try {
-        const caps = currentTrack?.getCapabilities?.();
-        if (caps?.focusMode?.includes?.('continuous')) {
-          await currentTrack.applyConstraints({ advanced:[{ focusMode:'continuous' }] });
+      // 2) Чекаємо появу потоку у <video>, тоді вмикаємо UI
+      await (async function waitForStream(){
+        let tries = 0;
+        while (!video.srcObject && tries++ < 50) {
+          await new Promise(r => setTimeout(r, 100));
         }
-        btnTorch.disabled = !(caps && 'torch' in caps);
-        setupZoomControl();
-      } catch(e){ log('capabilities/apply error', e?.message); }
+      })();
+
+      const stream = video.srcObject;
+      currentTrack = stream?.getVideoTracks?.()[0] || null;
+      updateTrackTags();
+      await tuneConstraintsForiOS();
+
+      if (video.paused) { try { await video.play(); } catch(_){} }
+      btnRestart.disabled = false;
+      const caps = currentTrack?.getCapabilities?.();
+      btnTorch.disabled = !(caps && 'torch' in caps);
+      setupZoomControl();
 
       setStatus('Наводь штрих-код у рамку…');
-      btnRestart.disabled = false;
 
       // Якщо autoplay заблоковано (iOS), покажемо оверлей
-      setTimeout(()=>{ if (!video.srcObject || video.paused || video.readyState < 2){ log('Autoplay blocked: showing tap overlay'); showTapOverlay(true); } }, 200);
+      setTimeout(()=>{ if (!video.srcObject || video.paused || video.readyState < 2){ log('Autoplay blocked: showing tap overlay'); showTapOverlay(true); } }, 300);
     }
 
     async function startCamera(){
@@ -239,13 +287,19 @@
           log('decodeWithDevice failed', e1?.message);
           // Fallback: decodeFromVideoDevice
           try {
-            await reader.decodeFromVideoDevice(chosenBackId, video, (result)=>{
+            reader.decodeFromVideoDevice(chosenBackId, video, (result, err)=>{
               if (sentOnce) return;
-              if (result){ sentOnce = true; handleCode(String(result.getText()||'').trim()); }
+              if (result){
+                const code = String(result.getText()||'').trim();
+                const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
+                sentOnce = true; showHit(code); handleCode(code, fmt);
+              } else if (err && !(err instanceof ZXing.NotFoundException)) {
+                log('decodeFromVideoDevice error:', err?.name || err);
+              }
             });
             log('fallback decodeFromVideoDevice started');
             const stream = video.srcObject; currentTrack = stream?.getVideoTracks?.()[0] || null;
-            updateTrackTags(); setupZoomControl();
+            updateTrackTags(); setupZoomControl(); await tuneConstraintsForiOS();
             setStatus('Наводь штрих-код у рамку…');
           } catch(e2){
             log('decodeFromVideoDevice failed', e2?.message);
@@ -253,12 +307,14 @@
             const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId:{ exact: chosenBackId } }, audio:false });
             video.srcObject = stream; await video.play().catch(()=>{});
             currentTrack = stream.getVideoTracks()[0];
-            updateTrackTags(); setupZoomControl();
+            updateTrackTags(); setupZoomControl(); await tuneConstraintsForiOS();
             setStatus('Камера працює, запускаю пошук коду…');
             reader.decodeFromVideoElement(video).then(result=>{
               if (sentOnce) return;
               sentOnce = true;
-              handleCode(String(result.getText()||'').trim());
+              const code = String(result.getText()||'').trim();
+              const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
+              showHit(code); handleCode(code, fmt);
             }).catch(err=>{ log('decodeFromVideoElement error', err?.message||err); });
           }
         }
@@ -280,10 +336,10 @@
       log("Stopped all tracks");
     }
 
-    function handleCode(code){
-      setStatus(`Зчитано: ${code}. Відправляю в бот…`);
+    function handleCode(code, fmt){
+      setStatus(`Зчитано: ${code} (${fmt}). Відправляю в бот…`);
       try { navigator.vibrate && navigator.vibrate(25); } catch(_){}
-      const payload = JSON.stringify({ t:'barcode', fmt:'EAN_13', code });
+      const payload = JSON.stringify({ t:'barcode', fmt, code });
       (async ()=>{
         try{
           if (tg?.sendData){ tg.sendData(payload); log('tg.sendData sent', payload); setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, 120); }
