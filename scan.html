@@ -3,38 +3,49 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер — штрих-код + OCR v1.7</title>
+  <title>Сканер — штрих-код + OCR v1.8</title>
   <style>
     :root{color-scheme:dark}
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
     header{padding:12px 16px;font-weight:600;background:#111;display:flex;gap:8px;align-items:center;justify-content:space-between}
     #video{width:100%;height:44vh;object-fit:cover;background:#000}
+    #status{padding:10px 16px;color:#cfcfcf;background:#111;min-height:42px}
     #bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#111;flex-wrap:wrap}
-    button{padding:10px 14px;border-radius:12px;border:1px solid #3a3a3a;background:#1b1b1b;color:#fff;cursor:pointer}
-    button.primary{background:#1f6feb;border-color:#2059c7;font-weight:700}
+    button{padding:12px 16px;border-radius:14px;border:1px solid #303030;background:#1b1b1b;color:#fff;cursor:pointer}
+    button.primary{background:#1f6feb;border-color:#2059c7;font-weight:700;font-size:16px}
     button:disabled{opacity:.5;cursor:not-allowed}
-    #status{padding:10px 16px;color:#cfcfcf;background:#111}
     #cameraList{padding:8px 10px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff}
-    #log{display:none}
-    #history{height:14vh;overflow:auto;background:#0a0a0a;border-top:1px solid #333;font:12px/1.3 ui-monospace,Consolas,monospace;padding:8px 12px}
     .tag{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;border:1px solid #444;border-radius:999px;font-size:12px;background:#1b1b1b}
     input[type="range"]{accent-color:#fff}
     #lastCode{position:absolute;left:0;right:0;top:8px;text-align:center;font:700 22px/1.2 system-ui;color:#00ff91;text-shadow:0 0 8px #000}
     #tapOverlay{position:absolute;left:0;right:0;top:56px;height:44vh;display:none;align-items:center;justify-content:center;pointer-events:auto;background:rgba(0,0,0,.35)}
+    #tapOverlay button{font-size:16px}
     #actions{position:sticky;bottom:0;display:flex;gap:10px;padding:12px 16px;background:#111;border-top:1px solid #333}
-    #btnSend{min-height:48px;flex:1}
+    #btnSend{min-height:52px;flex:1}
     #btnRescan{min-width:44%;background:#262626}
     #btnOCR{min-width:44%;background:#303030}
+    /* ROI overlay */
+    #roiMask{position:absolute;left:0;right:0;top:56px;height:44vh;pointer-events:none}
+    .mask{position:absolute;inset:0;background:rgba(0,0,0,.35)}
+    .hole{position:absolute;border:2px dashed rgba(255,255,255,.6);border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,.35)}
+    #hint{position:absolute;left:50%;transform:translateX(-50%);top:calc(56px + 44vh - 28px);font:600 12px/1 system-ui;color:#ddd;text-shadow:0 1px 2px #000}
   </style>
 </head>
 <body>
   <header>
-    <div>Сканер штрих-коду / тексту (OCR)</div>
-    <span class="tag" id="tagVer">v1.7</span>
+    <div>Сканер штрих-коду / тексту</div>
+    <span class="tag" id="tagVer">v1.8</span>
   </header>
 
   <div id="lastCode"></div>
   <video id="video" playsinline muted autoplay></video>
+
+  <!-- ROI overlay -->
+  <div id="roiMask">
+    <div class="mask"></div>
+    <div id="roi" class="hole"></div>
+  </div>
+  <div id="hint">Тримай штрихи горизонтально у рамці</div>
 
   <div id="tapOverlay">
     <button id="btnTapStart">▶️ Торкніться, щоб увімкнути камеру</button>
@@ -42,7 +53,7 @@
 
   <div id="bar">
     <button id="btnTorch" disabled>🔦 Ліхтарик</button>
-    <button id="btnRestart" disabled>🔁 Перезапустити</button>
+    <button id="btnRestart" disabled>🔁 Перезапуск</button>
     <select id="cameraList" title="Перемкнути камеру"></select>
     <input id="zoom" type="range" min="1" max="1" step="0.1" style="width:160px; display:none;">
     <span class="tag" id="tagFacing">facing: ?</span>
@@ -53,68 +64,75 @@
 
   <div id="actions">
     <button id="btnOCR">🅾️ Зчитати текст (OCR)</button>
-    <button id="btnRescan">🔄 Повторити скан</button>
+    <button id="btnRescan">↺ Почати заново</button>
     <button id="btnSend" class="primary" disabled>📤 Відправити в бот</button>
   </div>
 
   <div id="status">Ініціалізація…</div>
-  <div id="history"></div>
-  <div id="log"></div>
 
-  <!-- Бібліотеки -->
+  <!-- libs -->
   <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <script>
-    /* ====== HTTPS ====== */
-    try{if(location.protocol==='http:'&&location.hostname!=='localhost'){location.replace('https://'+location.host+location.pathname+location.search+location.hash)}}catch(_){}
-
-    /* ====== Версія ====== */
-    const VERSION='v1.7';
+    // ===== настройки =====
+    const VERSION='v1.8';
+    const ENABLE_OCR=true;
+    const AUTO_OCR_TIMEOUT_MS=2500; // через скільки секунд безуспішного скану включати OCR
     const SEND_DELAY_MS=150, RETRIES=2, RETRY_GAP_MS=350;
 
-    /* ====== Логи/історія ====== */
-    const logEl=document.getElementById('log'), histEl=document.getElementById('history');
-    const history=[];
-    function log(){/* приховано в UI */ console.log.apply(console,arguments)}
-    function pushHistory(item){history.unshift(item);while(history.length>10)history.pop();
-      histEl.textContent=history.map(h=>`${h.sent?'✅':'🟡'} [${new Date(h.ts).toLocaleTimeString()}] ${h.code} (${h.fmt})`).join("\n");}
+    // ROI (в процентах від відео): 70% ширини × 35% висоти
+    const ROI = { x:0.15, y:0.325, w:0.70, h:0.35 };
 
-    /* ====== Telegram bridge ====== */
+    // ===== допоміжні =====
     const tg=(window.Telegram&&window.Telegram.WebApp)?window.Telegram.WebApp:null;
-    if(tg){tg.expand();tg.ready&&tg.ready();log("TG WebApp", tg.platform, tg.version, VERSION)} else {log("TG WebApp NOT detected")}
-
-    /* ====== UI refs ====== */
+    if(tg){tg.expand();tg.ready&&tg.ready();}
     const video=document.getElementById('video'), statusEl=document.getElementById('status');
     const btnTorch=document.getElementById('btnTorch'), btnRestart=document.getElementById('btnRestart');
     const cameraList=document.getElementById('cameraList'), tagFacing=document.getElementById('tagFacing');
     const tagRes=document.getElementById('tagRes'), tagTorch=document.getElementById('tagTorch'), tagZoom=document.getElementById('tagZoom');
     const zoomEl=document.getElementById('zoom'), tapOverlay=document.getElementById('tapOverlay'), btnTapStart=document.getElementById('btnTapStart');
     const lastCodeEl=document.getElementById('lastCode'), btnSend=document.getElementById('btnSend'), btnRescan=document.getElementById('btnRescan'), btnOCR=document.getElementById('btnOCR');
+    const roiEl=document.getElementById('roi'), verEl=document.getElementById('tagVer');
 
-    function setStatus(t){statusEl.textContent=t;log("STATUS:",t)}
-    function showTapOverlay(b){tapOverlay.style.display=b?'flex':'none'}
+    function setStatus(t){statusEl.textContent=t}
     function showHit(code){lastCodeEl.textContent=`✓ ${code}`;lastCodeEl.style.color='#00ff91'}
+    verEl.textContent=VERSION;
 
-    /* ====== ZXing (штрих-код) ====== */
+    // позиціонуємо ROI-рамку
+    function placeROI(){
+      const vh=document.documentElement.clientHeight*0.44; // 44vh
+      const vw=document.documentElement.clientWidth;
+      const left   = Math.round(ROI.x*vw);
+      const top    = Math.round(ROI.y*vh + 56); // 56px header
+      const width  = Math.round(ROI.w*vw);
+      const height = Math.round(ROI.h*vh);
+      roiEl.style.left = left+'px';
+      roiEl.style.top  = top+'px';
+      roiEl.style.width= width+'px';
+      roiEl.style.height= height+'px';
+    }
+    placeROI(); addEventListener('resize', placeROI);
+
+    // ===== ZXing =====
     const hints=new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
-      ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.EAN_8,ZXing.BarcodeFormat.UPC_A,
-      ZXing.BarcodeFormat.CODE_128,ZXing.BarcodeFormat.ITF,ZXing.BarcodeFormat.CODE_39
+      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8, ZXing.BarcodeFormat.UPC_A,
+      ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.CODE_93
     ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
     hints.set(ZXing.DecodeHintType.ASSUME_GS1,true);
-    const reader=new ZXing.BrowserMultiFormatReader(hints,500);
+    const reader=new ZXing.BrowserMultiFormatReader(hints, 350); // трохи частіше
 
-    let currentTrack=null, chosenBackId=null, gotCode=false, lastPayload=null;
+    let currentTrack=null, chosenBackId=null, gotCode=false, lastPayload=null, lastTryTs=0;
 
     function updateTrackTags(){try{const s=currentTrack?.getSettings?.()||{};tagFacing.textContent=`facing: ${s.facingMode||"?"}`;
       tagRes.textContent=`res: ${s.width||"?"}x${s.height||"?"}`;const caps=currentTrack?.getCapabilities?.();tagTorch.textContent=`torch: ${caps&&'torch'in caps?'yes':'no'}`}catch(_){}}
 
     function setupZoomControl(){try{const caps=currentTrack?.getCapabilities?.();
-      if(caps?.zoom){zoomEl.min=caps.zoom.min??1;zoomEl.max=caps.zoom.max??5;zoomEl.step=caps.zoom.step??0.1;
-        const desired=Math.min(caps.zoom.max??2.5,Math.max(caps.zoom.min??1.5,2));
+      if(caps?.zoom){zoomEl.min=caps.zoom.min??1;zoomEl.max=caps.zoom.max??6;zoomEl.step=caps.zoom.step??0.1;
+        const desired=Math.min(caps.zoom.max??3,Math.max(caps.zoom.min??1.8,2.2)); // агресивніший дефолт
         zoomEl.value=currentTrack.getSettings().zoom??desired;zoomEl.style.display='inline-block';tagZoom.textContent=`zoom: ${zoomEl.value}`;
         currentTrack.applyConstraints({advanced:[{zoom:Number(zoomEl.value)}]}).catch(()=>{})}
       else{zoomEl.style.display='none';tagZoom.textContent='zoom: n/a'}}catch{}}
@@ -136,46 +154,107 @@
       return {devs,backId:chosenBackId};
     }
 
-    async function tuneConstraintsForiOS(){try{const caps=currentTrack?.getCapabilities?.();if(!caps)return;
-      if(caps.zoom){const mid=Math.min(caps.zoom.max||2.5,Math.max(caps.zoom.min||1.5,2));await currentTrack.applyConstraints({advanced:[{zoom:mid}]});tagZoom.textContent=`zoom: ${mid}`;}
-      if(caps.focusMode?.includes?.('continuous')){await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});}}catch{}}
+    async function tuneConstraints(){try{
+      const caps=currentTrack?.getCapabilities?.(); if(!caps) return;
+      if(caps.focusMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});
+      if(caps.exposureMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{exposureMode:'continuous'}]});
+    }catch{}}
 
     async function decodeWithDevice(deviceId){
-      setStatus('Запускаю декодер…');
-      const constraints={video:{deviceId:deviceId?{exact:deviceId}:undefined,facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30},advanced:[{focusMode:'continuous'}]},audio:false};
+      setStatus('Наводь штрих-код у рамку…'); lastTryTs=performance.now();
+      const constraints={video:{deviceId:deviceId?{exact:deviceId}:undefined,facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1440},frameRate:{ideal:30},advanced:[{focusMode:'continuous'}]},audio:false};
 
       reader.decodeFromConstraints(constraints, video, (result, err)=>{
-        if(gotCode)return;
+        if(gotCode) return;
         if(result){
           const code=String(result.getText()||'').trim();
           const fmt=String(result.getBarcodeFormat?.()||'UNKNOWN');
           gotCode=true; lastPayload={code,fmt}; showHit(code);
-          setStatus(`Зчитано штрих-код: ${code} (${fmt}). Натисни «Відправити в бот».`);
+          setStatus(`Зчитано: ${code} (${fmt}). Натисни «Відправити в бот».`);
           btnSend.disabled=false;
+          try{navigator.vibrate&&navigator.vibrate(25)}catch(_){}
+        } else if(err){
+          // після N секунд без коду — автоперехід в OCR
+          const now=performance.now();
+          if(ENABLE_OCR && !gotCode && now-lastTryTs>AUTO_OCR_TIMEOUT_MS){
+            lastTryTs=now+1e9; // щоб не повторювалося
+            runOCR();
+          }
         }
       });
 
       let tries=0; while(!video.srcObject&&tries++<60){await new Promise(r=>setTimeout(r,100))}
       const stream=video.srcObject; currentTrack=stream?.getVideoTracks?.()[0]||null;
-      updateTrackTags(); await tuneConstraintsForiOS();
+      updateTrackTags(); await tuneConstraints();
       if(video.paused){try{await video.play()}catch{}}
       btnRestart.disabled=false; const caps=currentTrack?.getCapabilities?.(); btnTorch.disabled=!(caps&&'torch'in caps); setupZoomControl();
-      setStatus('Наводь штрих-код у рамку…'); setTimeout(()=>{if(!video.srcObject||video.paused||video.readyState<2){showTapOverlay(true)}},300);
+      setStatus('Наводь штрих-код у рамку…'); setTimeout(()=>{if(!video.srcObject||video.paused||video.readyState<2){tapOverlay.style.display='flex'}},300);
     }
 
     async function startCamera(){
-      setStatus("Готую камеру…"); try{
+      setStatus("Готую камеру…");
+      try{
         let tries=0; while((!window.ZXing||!ZXing.BrowserMultiFormatReader)&&tries++<20){await new Promise(r=>setTimeout(r,100))}
         try{const tmp=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); tmp.getTracks().forEach(t=>t.stop())}catch{}
-        await enumerateCams(); if(!chosenBackId)throw new Error('Не знайдено відеокамери'); await decodeWithDevice(chosenBackId);
-      }catch(e){setStatus('Помилка доступу до камери. Перевір HTTPS/дозвіл.'); showTapOverlay(true)}
+        await enumerateCams(); if(!chosenBackId) throw new Error('Не знайдено відеокамери');
+        await decodeWithDevice(chosenBackId);
+      }catch(e){setStatus('Помилка доступу до камери. Перевір HTTPS/дозвіл.'); tapOverlay.style.display='flex'}
     }
 
-    async function stopAll(){try{await reader.reset()}catch{} try{await video.pause()}catch{} const s=video.srcObject; if(s&&s.getTracks){s.getTracks().forEach(t=>{try{t.stop()}catch{}})} video.srcObject=null; currentTrack=null; btnTorch.disabled=true}
+    async function stopAll(){
+      try{await reader.reset()}catch{} try{await video.pause()}catch{}
+      const s=video.srcObject; if(s&&s.getTracks){s.getTracks().forEach(t=>{try{t.stop()}catch{}})} video.srcObject=null; currentTrack=null; btnTorch.disabled=true
+    }
 
-    /* ====== Відправка в бот ====== */
+    // ===== OCR =====
+    let ocrWorker=null;
+    async function ensureOCR(){
+      if(ocrWorker) return ocrWorker;
+      ocrWorker = Tesseract.createWorker();
+      await ocrWorker.load(); await ocrWorker.loadLanguage('eng'); await ocrWorker.initialize('eng');
+      await ocrWorker.setParameters({ tessedit_char_whitelist: '0123456789/' });
+      return ocrWorker;
+    }
+
+    function grabROIFrame(){
+      const w=video.videoWidth, h=video.videoHeight; if(!w||!h){return null}
+      const c=document.createElement('canvas'), ctx=c.getContext('2d');
+      const rx=Math.round(ROI.x*w), ry=Math.round(ROI.y*h), rw=Math.round(ROI.w*w), rh=Math.round(ROI.h*h);
+      c.width=rw*2; c.height=rh*2; // апскейл ×2
+      ctx.filter='contrast(1.25) brightness(1.1) saturate(1.0)';
+      ctx.drawImage(video, rx, ry, rw, rh, 0, 0, c.width, c.height);
+      // легка бінаризація
+      const img=ctx.getImageData(0,0,c.width,c.height), data=img.data;
+      for(let i=0;i<data.length;i+=4){
+        const g = (data[i]*0.3 + data[i+1]*0.59 + data[i+2]*0.11);
+        const v = g>140 ? 255:0;
+        data[i]=data[i+1]=data[i+2]=v;
+      }
+      ctx.putImageData(img,0,0);
+      return c;
+    }
+
+    async function runOCR(){
+      if(!ENABLE_OCR) return;
+      setStatus('OCR: зчитую текст…');
+      const worker=await ensureOCR();
+      const canvas=grabROIFrame(); if(!canvas){setStatus('OCR: немає кадру відео'); return}
+      const { data:{ text } } = await worker.recognize(canvas);
+      const norm=(text||'').replace(/\s+/g,'').match(/[0-9\/]+/g);
+      const best = norm && norm[0] ? norm[0] : '';
+      if(best && best.length>=3){
+        gotCode=true; lastPayload={code:best, fmt:'OCR_TEXT'};
+        showHit(best);
+        setStatus(`Зчитано текст: ${best}. Натисни «Відправити в бот».`);
+        btnSend.disabled=false;
+      }else{
+        setStatus('OCR: не знайшов придатного тексту. Підійди ближче, збільши зум або поверни лейбл.');
+      }
+    }
+
+    // ===== Відправлення / керування =====
     btnSend.addEventListener('click', async ()=>{
-      if(!lastPayload){return}
+      if(!lastPayload) return;
       const payload=JSON.stringify({t:'barcode',fmt:lastPayload.fmt,code:lastPayload.code});
       let sent=false;
       if(tg?.sendData){
@@ -184,69 +263,28 @@
           try{tg.sendData(payload); sent=true; break}catch{await new Promise(r=>setTimeout(r,RETRY_GAP_MS))}}
         try{tg.close&&tg.close()}catch(_){}
       }else{
-        await navigator.clipboard?.writeText?.(lastPayload.code); alert(`Код: ${lastPayload.code}\n(Скопійовано у буфер обміну)`); sent=true;
+        await navigator.clipboard?.writeText?.(lastPayload.code); alert(`Код: ${lastPayload.code}\n(скопійовано)`); sent=true;
       }
-      pushHistory({ts:Date.now(),code:lastPayload.code,fmt:lastPayload.fmt,sent});
       await stopAll();
       setStatus(sent?'✅ Відправлено в бот. Можна закривати.':'⚠️ Не вдалося відправити. Спробуй ще раз.');
       btnSend.disabled=true;
     });
 
-    /* ====== Повтор ====== */
     btnRescan.addEventListener('click', async ()=>{
       gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true;
       await stopAll(); await startCamera();
     });
 
-    /* ====== OCR (надрукований текст) ====== */
-    let ocrWorker=null;
-    async function ensureOCR(){
-      if(ocrWorker) return ocrWorker;
-      ocrWorker = Tesseract.createWorker();
-      await ocrWorker.load();
-      await ocrWorker.loadLanguage('eng');
-      await ocrWorker.initialize('eng');
-      // Білі список символів: цифри та слеш
-      await ocrWorker.setParameters({ tessedit_char_whitelist: '0123456789/' });
-      return ocrWorker;
-    }
+    btnOCR.addEventListener('click', runOCR);
 
-    function grabFrame(){
-      const c=document.createElement('canvas'), w=video.videoWidth, h=video.videoHeight;
-      c.width=w; c.height=h;
-      const ctx=c.getContext('2d');
-      // Невеликий контраст/яскравість
-      ctx.filter='contrast(1.2) brightness(1.1)';
-      ctx.drawImage(video,0,0,w,h);
-      return c;
-    }
-
-    btnOCR.addEventListener('click', async ()=>{
-      setStatus('OCR: зчитую текст…');
-      const worker=await ensureOCR();
-      const canvas=grabFrame();
-      const { data:{ text } } = await worker.recognize(canvas);
-      const norm=(text||'').replace(/\s+/g,'').match(/[0-9\/]+/g);
-      const best = norm && norm[0] ? norm[0] : '';
-      if(best && best.length>=3){
-        lastPayload={code:best, fmt:'OCR_TEXT'};
-        showHit(best);
-        setStatus(`Зчитано текст: ${best}. Натисніть «Відправити в бот».`);
-        btnSend.disabled=false;
-      }else{
-        setStatus('OCR: не знайшов придатного тексту. Спробуйте підвести ближче/яскравіше або інший ракурс.');
-      }
-    });
-
-    /* ====== Torch / restart / camera switch ====== */
-    btnTorch.onclick=async()=>{try{const caps=currentTrack?.getCapabilities?.(); if(caps&&'torch'in caps){const set=currentTrack.getSettings(); await currentTrack.applyConstraints({advanced:[{torch:!set.torch}]});} }catch{}}
+    btnTorch.onclick=async()=>{try{const caps=currentTrack?.getCapabilities?.(); if(caps&&'torch'in caps){const set=currentTrack.getSettings(); await currentTrack.applyConstraints({advanced:[{torch:!set.torch}]});}}catch{}}
     btnRestart.onclick=async()=>{await stopAll(); gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true; await startCamera()}
     cameraList.onchange=async()=>{const id=cameraList.value; if(!id)return; localStorage.setItem("scanner.preferredDeviceId",id);
       chosenBackId=id; await stopAll(); gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true; await startCamera()}
 
     window.addEventListener('beforeunload', stopAll);
-    (async()=>{document.getElementById('tagVer').textContent=VERSION; video.setAttribute('playsinline',''); video.muted=true; await startCamera()})();
-    btnTapStart.addEventListener('click', async()=>{showTapOverlay(false); if(!video.srcObject){await startCamera()} try{await video.play()}catch{}});
+    (async()=>{video.setAttribute('playsinline',''); video.muted=true; await startCamera()})();
+    btnTapStart.addEventListener('click', async()=>{tapOverlay.style.display='none'; if(!video.srcObject){await startCamera()} try{await video.play()}catch{}});
   </script>
 </body>
 </html>
