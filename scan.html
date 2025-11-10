@@ -3,53 +3,57 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — v1.6 (manual send)</title>
+  <title>Сканер штрих-коду — v1.7</title>
   <style>
     :root{color-scheme:dark}
+    *{box-sizing:border-box}
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
-    header{padding:12px 16px;font-weight:600;background:#111;display:flex;gap:8px;align-items:center;justify-content:space-between}
-    #video{width:100%;height:44vh;object-fit:cover;background:#000}
-    #bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#111;flex-wrap:wrap}
-    button{padding:8px 12px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
-    button:disabled{opacity:.5;cursor:not-allowed}
-    #status{padding:8px 16px;color:#ccc;background:#111}
-    #cameraList{padding:6px 8px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#fff}
-    #log{height:22vh;overflow:auto;background:#0c0c0c;border-top:1px solid #333;font-family:ui-monospace,Consolas,monospace;padding:8px 12px;white-space:pre-wrap}
-    #history{height:14vh;overflow:auto;background:#0a0a0a;border-top:1px solid #333;font:12px/1.3 ui-monospace,Consolas,monospace;padding:8px 12px}
-    .tag{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;border:1px solid #444;border-radius:999px;font-size:12px;background:#1b1b1b}
-    input[type="range"]{accent-color:#fff}
-    #lastCode{position:absolute;left:0;right:0;top:8px;text-align:center;font:700 22px/1.2 system-ui;color:#00ff91;text-shadow:0 0 8px #000}
-    #tapOverlay{position:absolute;left:0;right:0;top:56px;height:44vh;display:none;align-items:center;justify-content:center;pointer-events:auto;background:rgba(0,0,0,.35)}
-    #actions{position:sticky;bottom:0;display:flex;gap:8px;padding:10px 16px;background:#111;border-top:1px solid #333}
-    #btnSend{background:#1f6feb;border-color:#2059c7}
-    #btnRescan{background:#1b1b1b}
+    header{padding:12px 16px;background:#111;display:flex;align-items:center;justify-content:space-between;gap:8px}
+    header .title{font-weight:600}
+    .chip{display:inline-block;font-size:12px;padding:4px 8px;border:1px solid #333;border-radius:999px;background:#1b1b1b;color:#bbb}
+
+    /* Камера */
+    #wrap{position:relative}
+    #video{width:100%;height:58vh;object-fit:cover;background:#000}
+    #tapOverlay{position:absolute;left:0;right:0;top:0;bottom:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35)}
+    #btnTapStart{font-size:16px;padding:12px 16px;border-radius:12px;border:1px solid #666;background:#1b1b1b;color:#fff}
+
+    /* Маркер успішного зчитування */
+    #lastCode{position:absolute;left:0;right:0;top:10px;text-align:center;font:700 22px/1.2 system-ui;color:#00ff91;text-shadow:0 0 10px #000}
+
+    /* Верхня панель дій (мінімум) */
+    #miniBar{position:absolute;right:12px;bottom:12px;display:flex;gap:8px}
+    .iconBtn{height:44px;min-width:44px;border-radius:12px;border:1px solid #333;background:#1b1b1b;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}
+    .iconBtn:disabled{opacity:.5;cursor:not-allowed}
+
+    /* Низ (великі кнопки) */
+    #actions{position:sticky;bottom:0;display:flex;gap:10px;padding:12px 16px;background:#111;border-top:1px solid #262626}
+    #btnSend{flex:1;height:56px;font-size:17px;border-radius:14px;border:1px solid #1a5fd0;background:#1f6feb;color:#fff;cursor:pointer}
+    #btnSend:disabled{opacity:.5;cursor:not-allowed}
+    #btnRescan{width:160px;height:56px;font-size:15px;border-radius:14px;border:1px solid #333;background:#1b1b1b;color:#fff}
+    #status{padding:10px 16px;color:#cfcfcf;background:#111;border-top:1px solid #1c1c1c}
+
+    /* Прихований блок логів (вмикається ?debug=1) */
+    #debug{display:none;padding:10px 16px;font:12px/1.35 ui-monospace,Consolas,monospace;background:#0b0b0b;border-top:1px solid #222;white-space:pre-wrap;max-height:24vh;overflow:auto}
   </style>
 </head>
 <body>
   <header>
-    <div>Наведи камеру на штрих-код — DEBUG (manual send)</div>
-    <span class="tag" id="tagVer">v1.6</span>
+    <div class="title">Сканер штрих-коду</div>
+    <span class="chip" id="tagVer">v1.7</span>
   </header>
 
-  <div id="lastCode"></div>
-  <video id="video" playsinline muted autoplay></video>
+  <div id="wrap">
+    <div id="lastCode"></div>
+    <video id="video" playsinline muted autoplay></video>
 
-  <div id="tapOverlay">
-    <button id="btnTapStart" style="font-size:16px;padding:10px 14px;border-radius:12px;border:1px solid #666;background:#1b1b1b;color:#fff">
-      ▶️ Торкнись, щоб увімкнути камеру
-    </button>
-  </div>
+    <!-- iOS tap-to-play -->
+    <div id="tapOverlay"><button id="btnTapStart">▶️ Торкнись, щоб увімкнути камеру</button></div>
 
-  <div id="bar">
-    <button id="btnTorch" disabled>🔦 Torch</button>
-    <button id="btnRestart" disabled>🔁 Restart</button>
-    <select id="cameraList" title="Перемкнути камеру"></select>
-    <input id="zoom" type="range" min="1" max="1" step="0.1" style="width:160px; display:none;">
-    <button id="btnDownload">⬇️ Download logs</button>
-    <span class="tag" id="tagFacing">facing: ?</span>
-    <span class="tag" id="tagRes">res: ?</span>
-    <span class="tag" id="tagTorch">torch: ?</span>
-    <span class="tag" id="tagZoom">zoom: n/a</span>
+    <!-- мінімальна панель (тільки ліхтарик) -->
+    <div id="miniBar">
+      <button class="iconBtn" id="btnTorch" title="Ліхтарик" disabled>🔦</button>
+    </div>
   </div>
 
   <div id="actions">
@@ -58,174 +62,243 @@
   </div>
 
   <div id="status">Ініціалізація…</div>
-  <div id="history"></div>
-  <div id="log"></div>
+  <div id="debug"></div>
 
   <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
-    // --- HTTPS enforce ---
-    try{if(location.protocol==='http:'&&location.hostname!=='localhost'){location.replace('https://'+location.host+location.pathname+location.search+location.hash)}}catch(_){}
+    /* --- HTTPS enforce --- */
+    try{
+      if(location.protocol==='http:' && location.hostname!=='localhost'){
+        location.replace('https://' + location.host + location.pathname + location.search + location.hash);
+      }
+    }catch(_){}
 
-    // ---- Tunables ----
-    const VERSION='v1.6';
-    const SEND_DELAY_MS=150;       // невелика пауза перед sendData
+    /* --- Tunables --- */
+    const VERSION='v1.7';
+    const SEND_DELAY_MS=150;
     const RETRIES=2, RETRY_GAP_MS=350;
 
-    // ---- Logger & history ----
-    const logEl=document.getElementById('log');
-    const histEl=document.getElementById('history');
-    const logs=[], history=[];
-    function log(...a){const line=a.map(v=>{try{return typeof v==='string'?v:JSON.stringify(v)}catch{return String(v)}}).join(' ');
-      const ts=new Date().toISOString().split('T')[1].replace('Z','');const msg=`[${ts}] ${line}`;logs.push(msg);console.log(msg);
-      logEl.textContent+=msg+"\n";logEl.scrollTop=logEl.scrollHeight}
-    function pushHistory(item){history.unshift(item);while(history.length>10)history.pop();
-      histEl.textContent=history.map(h=>`${h.sent?'✅':'🟡'} [${new Date(h.ts).toLocaleTimeString()}] ${h.code} (${h.fmt})`).join("\n");}
+    /* --- Debug toggle (?debug=1) --- */
+    const params=new URLSearchParams(location.search);
+    const debugMode=params.get('debug')==='1';
+    const dbg=document.getElementById('debug');
+    if(debugMode) dbg.style.display='block';
 
-    document.getElementById('btnDownload').onclick=()=>{
-      const blob=new Blob([logs.join("\n")],{type:"text/plain"});const a=document.createElement('a');
-      a.href=URL.createObjectURL(blob);a.download=`scanner_logs_${Date.now()}.txt`;a.click();URL.revokeObjectURL(a.href);};
+    function dlog(...a){
+      if(!debugMode) return;
+      const line=a.map(v=>{try{return typeof v==='string'?v:JSON.stringify(v)}catch{return String(v)}}).join(' ');
+      const ts=new Date().toISOString().split('T')[1].replace('Z','');
+      dbg.textContent += `[${ts}] ${line}\n`;
+      dbg.scrollTop = dbg.scrollHeight;
+      console.log('[DBG]', ...a);
+    }
 
-    // ---- Telegram bridge ----
+    /* --- Telegram bridge --- */
     const tg=(window.Telegram&&window.Telegram.WebApp)?window.Telegram.WebApp:null;
-    if(tg){tg.expand();tg.ready&&tg.ready();log("TG WebApp", tg.platform, tg.version, VERSION)} else {log("TG WebApp NOT detected — відкрий через кнопку в боті")}
+    if(tg){tg.expand();tg.ready&&tg.ready(); dlog("TG WebApp", tg.platform, tg.version, VERSION)}
+    else {dlog("TG WebApp NOT detected — відкрий через кнопку в боті")}
 
-    // ---- UI refs ----
-    const video=document.getElementById('video'), statusEl=document.getElementById('status');
-    const btnTorch=document.getElementById('btnTorch'), btnRestart=document.getElementById('btnRestart');
-    const cameraList=document.getElementById('cameraList'), tagFacing=document.getElementById('tagFacing');
-    const tagRes=document.getElementById('tagRes'), tagTorch=document.getElementById('tagTorch'), tagZoom=document.getElementById('tagZoom');
-    const zoomEl=document.getElementById('zoom'), tapOverlay=document.getElementById('tapOverlay'), btnTapStart=document.getElementById('btnTapStart');
-    const lastCodeEl=document.getElementById('lastCode'), btnSend=document.getElementById('btnSend'), btnRescan=document.getElementById('btnRescan');
+    /* --- UI refs --- */
+    const video=document.getElementById('video');
+    const statusEl=document.getElementById('status');
+    const lastCodeEl=document.getElementById('lastCode');
+    const tapOverlay=document.getElementById('tapOverlay');
+    const btnTapStart=document.getElementById('btnTapStart');
+    const btnSend=document.getElementById('btnSend');
+    const btnRescan=document.getElementById('btnRescan');
+    const btnTorch=document.getElementById('btnTorch');
 
-    function setStatus(t){statusEl.textContent=t;log("STATUS:",t)}
-    function showTapOverlay(b){tapOverlay.style.display=b?'flex':'none'}
-    function showHit(code){lastCodeEl.textContent=`✓ ${code}`;lastCodeEl.style.color='#00ff91'}
+    function setStatus(t){ statusEl.textContent=t; dlog('STATUS:', t); }
+    function showOverlay(b){ tapOverlay.style.display=b?'flex':'none'; }
+    function showHit(code){ lastCodeEl.textContent=`✓ ${code}`; lastCodeEl.style.color='#00ff91'; }
 
-    // ---- ZXing setup ----
+    /* --- ZXing --- */
     const hints=new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.EAN_8,ZXing.BarcodeFormat.UPC_A,ZXing.BarcodeFormat.CODE_128,ZXing.BarcodeFormat.ITF,ZXing.BarcodeFormat.CODE_39]);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER,true);hints.set(ZXing.DecodeHintType.ASSUME_GS1,true);
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.ITF,
+      ZXing.BarcodeFormat.CODE_39
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
+    hints.set(ZXing.DecodeHintType.ASSUME_GS1,true);
     const reader=new ZXing.BrowserMultiFormatReader(hints,500);
 
-    let currentTrack=null, chosenBackId=null, gotCode=false, lastPayload=null;
+    let currentTrack=null, chosenDeviceId=null, gotCode=false, lastPayload=null;
 
-    const errStats={NotFound:0,Checksum:0,Format:0,Other:0};let lastErrLogTs=0;
+    const errStats={NotFound:0,Checksum:0,Format:0,Other:0};
+    let lastErrLogTs=0;
     function onDecodeError(err){
-      if(!err)return;
-      if(err instanceof ZXing.NotFoundException)errStats.NotFound++;
-      else if(err instanceof ZXing.ChecksumException)errStats.Checksum++;
-      else if(err instanceof ZXing.FormatException)errStats.Format++; else errStats.Other++;
-      const now=performance.now(); if(now-lastErrLogTs>1200){ lastErrLogTs=now;
-        const hint=errStats.Checksum>errStats.NotFound?"→ Додай світла/прибери бліки.":errStats.Format>errStats.NotFound?"→ Можливо не EAN/UPC/ITF/Code128.":"→ Тримай штрихи горизонтально, займи ~70% кадру.";
-        setStatus(`Пошук коду… ${hint}`); log('decode stats', JSON.stringify(errStats));}
+      if(!err) return;
+      if(err instanceof ZXing.NotFoundException) errStats.NotFound++;
+      else if(err instanceof ZXing.ChecksumException) errStats.Checksum++;
+      else if(err instanceof ZXing.FormatException)  errStats.Format++;
+      else errStats.Other++;
+
+      const now=performance.now();
+      if(now-lastErrLogTs>1200){
+        lastErrLogTs=now;
+        const hint = errStats.Checksum>errStats.NotFound
+          ? 'Додай світла або прибери бліки.'
+          : (errStats.Format>errStats.NotFound
+            ? 'Можливо, це не EAN/UPC/ITF/Code128.'
+            : 'Тримай штрихи горизонтально, займи ~70% ширини кадру.');
+        setStatus(`Пошук коду… ${hint}`);
+        dlog('decode stats', JSON.stringify(errStats));
+      }
     }
 
-    function updateTrackTags(){try{const s=currentTrack?.getSettings?.()||{};tagFacing.textContent=`facing: ${s.facingMode||"?"}`;
-      tagRes.textContent=`res: ${s.width||"?"}x${s.height||"?"}`;const caps=currentTrack?.getCapabilities?.();tagTorch.textContent=`torch: ${caps&&'torch'in caps?'yes':'no'}`}catch(_){}}
-
-    function setupZoomControl(){try{const caps=currentTrack?.getCapabilities?.();
-      if(caps?.zoom){zoomEl.min=caps.zoom.min??1;zoomEl.max=caps.zoom.max??5;zoomEl.step=caps.zoom.step??0.1;const desired=Math.min(caps.zoom.max??2.5,Math.max(caps.zoom.min??1.5,2));
-        zoomEl.value=currentTrack.getSettings().zoom??desired;zoomEl.style.display='inline-block';tagZoom.textContent=`zoom: ${zoomEl.value}`;
-        currentTrack.applyConstraints({advanced:[{zoom:Number(zoomEl.value)}]}).catch(()=>{})}else{zoomEl.style.display='none';tagZoom.textContent='zoom: n/a'}}catch{}}
-    zoomEl.addEventListener('input', async()=>{try{await currentTrack.applyConstraints({advanced:[{zoom:Number(zoomEl.value)}]});tagZoom.textContent=`zoom: ${zoomEl.value}`;log("Zoom set to",zoomEl.value)}catch(e){log("zoom error",e)}});
-
-    function isUltraWideLabel(lbl){return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl||'')}
-    function isTeleLabel(lbl){return /tele|telephoto|2x|3x|5x|10x/i.test(lbl||'')}
-    function isBackLabel(lbl){return /back|rear|environment|тилов|задн/i.test(lbl||'')}
-    function rankCamera(label){if(isTeleLabel(label)&&isBackLabel(label))return 3;if(isBackLabel(label)&&!isUltraWideLabel(label))return 2;if(isUltraWideLabel(label))return 1;return 0}
+    function preferDevice(devs){
+      // Пріоритет: telephoto/back → просто back → інші
+      const isUW = l=>/ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(l||'');
+      const isTele = l=>/tele|telephoto|2x|3x|5x|10x/i.test(l||'');
+      const isBack = l=>/back|rear|environment|тилов|задн/i.test(l||'');
+      const rank = l => (isTele(l)&&isBack(l))?3 : (isBack(l)&&!isUW(l))?2 : isUW(l)?1 : 0;
+      return [...devs].sort((a,b)=>rank(b.label)-rank(a.label))[0];
+    }
 
     async function enumerateCams(){
-      const devs=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
-      log("Devices:", devs.map(d=>({label:d.label,deviceId:d.deviceId,groupId:d.groupId})));
-      cameraList.innerHTML=devs.map((d,i)=>{const lbl=d.label||`Камера ${i+1}`;const tags=[isTeleLabel(lbl)?'telephoto':'',isUltraWideLabel(lbl)?'ultra-wide':'',isBackLabel(lbl)?'back':''].filter(Boolean).join(', ');return `<option value="${d.deviceId}">${lbl}${tags?` (${tags})`:''}</option>`}).join("");
-      cameraList.style.display=devs.length>1?"block":"none";
-      const savedId=localStorage.getItem("scanner.preferredDeviceId");
-      let preferred=devs.find(d=>d.deviceId===savedId)||devs.filter(d=>isBackLabel(d.label)).sort((a,b)=>rankCamera(b.label)-rankCamera(a.label))[0]||devs[devs.length-1];
-      chosenBackId=preferred?preferred.deviceId:(devs[0]&&devs[0].deviceId);
-      log("Chosen deviceId:",chosenBackId,"label:",preferred&&preferred.label,"rank:",preferred&&rankCamera(preferred.label));
-      if(chosenBackId)cameraList.value=chosenBackId;
-      return {devs,backId:chosenBackId};
+      const devs=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+      const saved=localStorage.getItem('scanner.preferredDeviceId');
+      let preferred = devs.find(d=>d.deviceId===saved) || preferDevice(devs) || devs[0];
+      chosenDeviceId = preferred && preferred.deviceId;
+      dlog('Devices:', devs.map(d=>({label:d.label, id:d.deviceId})));
+      dlog('Chosen deviceId:', chosenDeviceId, 'label:', preferred && preferred.label);
     }
 
-    async function tuneConstraintsForiOS(){try{const caps=currentTrack?.getCapabilities?.();if(!caps)return;
-      if(caps.zoom){const mid=Math.min(caps.zoom.max||2.5,Math.max(caps.zoom.min||1.5,2));await currentTrack.applyConstraints({advanced:[{zoom:mid}]});tagZoom.textContent=`zoom: ${mid}`;}
-      if(caps.focusMode?.includes?.('continuous')){await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});}}catch(e){log('constraints tune error',e?.message)}}
+    async function tuneTrack(){
+      try{
+        const caps=currentTrack?.getCapabilities?.(); if(!caps) return;
+        if(caps.zoom){
+          const mid=Math.min(caps.zoom.max||2.5, Math.max(caps.zoom.min||1.5, 2));
+          await currentTrack.applyConstraints({advanced:[{zoom:mid}]});
+        }
+        if(caps.focusMode?.includes?.('continuous')){
+          await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});
+        }
+      }catch(e){ dlog('tune error', e?.message); }
+    }
 
     async function decodeWithDevice(deviceId){
       setStatus('Запускаю декодер…');
-      const constraints={video:{deviceId:deviceId?{exact:deviceId}:undefined,facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30},advanced:[{focusMode:'continuous'}]},audio:false};
+      const constraints = {
+        video: {
+          deviceId: deviceId?{exact:deviceId}:undefined,
+          facingMode: {ideal:'environment'},
+          width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30},
+          advanced:[{focusMode:'continuous'}]
+        },
+        audio:false
+      };
 
       reader.decodeFromConstraints(constraints, video, (result, err)=>{
-        if(gotCode)return;
+        if(gotCode) return;
         if(result){
           const code=String(result.getText()||'').trim();
-          const fmt=String(result.getBarcodeFormat?.()||'UNKNOWN');
-          gotCode=true; lastPayload={code,fmt}; showHit(code);
+          const fmt =String(result.getBarcodeFormat?.()||'UNKNOWN');
+          gotCode=true; lastPayload={code,fmt};
+          showHit(code);
           setStatus(`Зчитано: ${code} (${fmt}). Натисни «Відправити в бот».`);
           btnSend.disabled=false; btnRescan.disabled=false;
-          try{navigator.vibrate&&navigator.vibrate(25)}catch(_){}
-        } else if(err){onDecodeError(err)}
+          try{navigator.vibrate && navigator.vibrate(25)}catch(_){}
+        } else if(err){ onDecodeError(err); }
       });
 
-      let tries=0; while(!video.srcObject&&tries++<60){await new Promise(r=>setTimeout(r,100))}
-      const stream=video.srcObject; currentTrack=stream?.getVideoTracks?.()[0]||null;
-      updateTrackTags(); await tuneConstraintsForiOS();
-      if(video.paused){try{await video.play()}catch{}}
-      btnRestart.disabled=false; const caps=currentTrack?.getCapabilities?.(); btnTorch.disabled=!(caps&&'torch'in caps); setupZoomControl();
-      setStatus('Наводь штрих-код у рамку…'); setTimeout(()=>{if(!video.srcObject||video.paused||video.readyState<2){log('Autoplay blocked');showTapOverlay(true)}},300);
+      let tries=0; while(!video.srcObject && tries++<60){ await new Promise(r=>setTimeout(r,100)); }
+      currentTrack = video.srcObject?.getVideoTracks?.()[0] || null;
+      await tuneTrack();
+
+      if(video.paused){ try{ await video.play(); }catch{} }
+      const caps=currentTrack?.getCapabilities?.();
+      btnTorch.disabled = !(caps && 'torch' in caps);
+
+      setStatus('Наводь штрих-код у рамку…');
+      setTimeout(()=>{ if(!video.srcObject || video.paused || video.readyState<2){ showOverlay(true); } }, 300);
     }
 
     async function startCamera(){
-      setStatus("Готую камеру…"); try{
-        let tries=0; while((!window.ZXing||!ZXing.BrowserMultiFormatReader)&&tries++<20){await new Promise(r=>setTimeout(r,100))}
-        try{const tmp=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); tmp.getTracks().forEach(t=>t.stop()); log('Permission probe ok')}catch(e){log('Permission probe error',e?.name,e?.message)}
-        await enumerateCams(); if(!chosenBackId)throw new Error('Не знайдено відеокамери'); await decodeWithDevice(chosenBackId);
-      }catch(e){log('startCamera error',e?.message||e); setStatus('Помилка доступу до камери. Перевір HTTPS/дозвіл.'); showTapOverlay(true)}
+      setStatus('Готую камеру…');
+      try{
+        // Дочекаємось завантаження ZXing
+        let t=0; while((!window.ZXing||!ZXing.BrowserMultiFormatReader) && t++<20){ await new Promise(r=>setTimeout(r,100)); }
+        // Разовий запит дозволу — щоб з’явились назви камер
+        try{ const tmp=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); tmp.getTracks().forEach(t=>t.stop()); }catch(e){}
+        await enumerateCams();
+        if(!chosenDeviceId) throw new Error('Не знайдено відеокамери');
+        await decodeWithDevice(chosenDeviceId);
+      }catch(e){
+        dlog('startCamera error', e?.message||e);
+        setStatus('Помилка доступу до камери. Перевір HTTPS/дозвіл.');
+        showOverlay(true);
+      }
     }
 
-    async function stopAll(){try{await reader.reset()}catch(e){log("reader.reset error",e)}
-      try{await video.pause()}catch(e){log("video.pause error",e)}
-      const s=video.srcObject; if(s&&s.getTracks){s.getTracks().forEach(t=>{try{t.stop()}catch{}})} video.srcObject=null; currentTrack=null; btnTorch.disabled=true; log("Stopped all tracks")}
+    async function stopAll(){
+      try{ await reader.reset(); }catch(e){}
+      try{ await video.pause(); }catch(e){}
+      const s=video.srcObject;
+      if(s&&s.getTracks){ s.getTracks().forEach(t=>{ try{t.stop()}catch{} }); }
+      video.srcObject=null; currentTrack=null;
+      btnTorch.disabled=true;
+    }
 
-    // ---- Manual send ----
+    /* --- Torch --- */
+    btnTorch.addEventListener('click', async ()=>{
+      try{
+        const caps=currentTrack?.getCapabilities?.();
+        if(!(caps && 'torch' in caps)) return;
+        const set=currentTrack.getSettings();
+        await currentTrack.applyConstraints({advanced:[{torch:!set.torch}]});
+      }catch(e){ dlog('torch error', e?.message||e); }
+    });
+
+    /* --- Manual send --- */
     btnSend.addEventListener('click', async ()=>{
-      if(!lastPayload){return}
-      const payload=JSON.stringify({t:'barcode',fmt:lastPayload.fmt,code:lastPayload.code});
+      if(!lastPayload) return;
+      const payload = JSON.stringify({ t:'barcode', fmt:lastPayload.fmt, code:lastPayload.code });
       let sent=false;
+
       if(tg?.sendData){
-        await new Promise(r=>setTimeout(r,SEND_DELAY_MS));
+        await new Promise(r=>setTimeout(r, SEND_DELAY_MS));
         for(let i=0;i<=RETRIES;i++){
-          try{tg.sendData(payload); log(i?`tg.sendData retry#${i} sent`:'tg.sendData sent',payload); sent=true; break}
-          catch(e){log(i?`tg.sendData retry#${i} ERROR`:'tg.sendData ERROR',e?.message||e); await new Promise(r=>setTimeout(r,RETRY_GAP_MS))}
+          try{ tg.sendData(payload); sent=true; break; }
+          catch(e){ await new Promise(r=>setTimeout(r, RETRY_GAP_MS)); }
         }
-        pushHistory({ts:Date.now(),code:lastPayload.code,fmt:lastPayload.fmt,sent});
-        try{tg.close&&tg.close()}catch(_){}
+        try{ tg.close && tg.close(); }catch(_){}
       }else{
         await navigator.clipboard?.writeText?.(lastPayload.code);
-        alert(`Код: ${lastPayload.code}\n(Скопійовано у буфер обміну)`); sent=true;
-        pushHistory({ts:Date.now(),code:lastPayload.code,fmt:lastPayload.fmt,sent});
+        alert(`Код: ${lastPayload.code}\n(Скопійовано у буфер обміну)`);
+        sent=true;
       }
-      await stopAll(); // закриваємо камеру після відправки
+
+      await stopAll();
       btnSend.disabled=true;
-      setStatus(sent?'✅ Відправлено в бот. Можеш закрити вікно.':'⚠️ Не вдалося відправити. Спробуй ще раз.');
+      setStatus(sent ? '✅ Відправлено в бот. Можеш закрити вікно.' : '⚠️ Не вдалося відправити. Спробуй ще раз.');
     });
 
     btnRescan.addEventListener('click', async ()=>{
-      gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true; btnRescan.disabled=true;
+      gotCode=false; lastPayload=null; lastCodeEl.textContent='';
+      btnSend.disabled=true; btnRescan.disabled=true;
       await stopAll(); await startCamera();
     });
 
-    // Torch / restart / camera switch
-    btnTorch.onclick=async()=>{try{const caps=currentTrack?.getCapabilities?.(); if(caps&&'torch'in caps){const set=currentTrack.getSettings(); await currentTrack.applyConstraints({advanced:[{torch:!set.torch}]}); log("Torch toggled")} else {log("Torch not supported")}}catch(e){log("Torch error",e)}}
-    btnRestart.onclick=async()=>{await stopAll(); gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true; btnRescan.disabled=true; errStats.NotFound=errStats.Checksum=errStats.Format=errStats.Other=0; await startCamera()}
-    cameraList.onchange=async()=>{const id=cameraList.value; if(!id)return; localStorage.setItem("scanner.preferredDeviceId",id); log("Manual camera switch to",id);
-      chosenBackId=id; await stopAll(); gotCode=false; lastPayload=null; lastCodeEl.textContent=''; btnSend.disabled=true; btnRescan.disabled=true; errStats.NotFound=errStats.Checksum=errStats.Format=errStats.Other=0; await startCamera()}
+    /* --- iOS tap overlay --- */
+    btnTapStart.addEventListener('click', async ()=>{
+      showOverlay(false);
+      if(!video.srcObject){ await startCamera(); }
+      try{ await video.play(); }catch(e){}
+    });
 
     window.addEventListener('beforeunload', stopAll);
 
-    (async()=>{log('UA:',navigator.userAgent); document.getElementById('tagVer').textContent=VERSION; video.setAttribute('playsinline',''); video.muted=true; await startCamera()})();
-    btnTapStart.addEventListener('click', async()=>{showTapOverlay(false); if(!video.srcObject){await startCamera()} try{await video.play()}catch(e){log('manual play error',e?.message||e)}});
+    (async ()=>{
+      document.getElementById('tagVer').textContent = VERSION;
+      video.setAttribute('playsinline',''); video.muted = true;
+      await startCamera();
+    })();
   </script>
 </body>
 </html>
