@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — EAN-13 / EAN-8 / UPC-A / CODE-128 (ultra-wide, AUTO) v1.3</title>
+  <title>Сканер штрих-коду — multi (auto camera) v1.4</title>
   <style>
     :root{color-scheme:dark}
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
@@ -22,8 +22,8 @@
 </head>
 <body>
   <header>
-    <div>Наведи камеру на штрих-код — DEBUG (rear ultra-wide)</div>
-    <span class="tag" id="tagVer">v1.3</span>
+    <div>Наведи камеру на штрих-код — DEBUG (auto camera)</div>
+    <span class="tag" id="tagVer">v1.4</span>
   </header>
 
   <div id="lastCode"></div>
@@ -54,7 +54,7 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     // ---- Version ----
-    const VERSION = 'v1.3';
+    const VERSION = 'v1.4';
 
     // ---- Logger ----
     const logEl = document.getElementById('log');
@@ -106,20 +106,45 @@
       setTimeout(()=> lastCodeEl.textContent = '', 2500);
     }
 
-    // ---- ZXing setup (multi-format + try harder) ----
+    // ---- ZXing setup (multi-format + hints) ----
     const hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
       ZXing.BarcodeFormat.EAN_13,
       ZXing.BarcodeFormat.EAN_8,
       ZXing.BarcodeFormat.UPC_A,
-      ZXing.BarcodeFormat.CODE_128
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.ITF,       // ITF-14
+      ZXing.BarcodeFormat.CODE_39
     ]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    const reader = new ZXing.BrowserMultiFormatReader(hints, 300);
+    hints.set(ZXing.DecodeHintType.ASSUME_GS1, true);
+    const reader = new ZXing.BrowserMultiFormatReader(hints, 500);
 
     let currentTrack = null;
     let chosenBackId = null;
     let sentOnce = false;
+
+    // ---- Decode error telemetry (зрозуміти чому не читає) ----
+    const errStats = { NotFound:0, Checksum:0, Format:0, Other:0 };
+    let lastErrLogTs = 0;
+    function onDecodeError(err){
+      if (!err) return;
+      if (err instanceof ZXing.NotFoundException) errStats.NotFound++;
+      else if (err instanceof ZXing.ChecksumException) errStats.Checksum++;
+      else if (err instanceof ZXing.FormatException) errStats.Format++;
+      else errStats.Other++;
+
+      // лог раз на 1.5с, щоб не спамити
+      const now = performance.now();
+      if (now - lastErrLogTs > 1500){
+        lastErrLogTs = now;
+        const hint =
+          errStats.Checksum > errStats.NotFound ? "→ Порада: додай світла/наблизь — збій контрольної суми." :
+          errStats.Format   > errStats.NotFound ? "→ Порада: формат не збігається — перевір, що це EAN/UPC/ITF/Code128." :
+          "→ Порада: немає патерну — тримай рівно, щоб штрихи були горизонтальні, збільш масштаб.";
+        log(`decode stats NotFound=${errStats.NotFound} Checksum=${errStats.Checksum} Format=${errStats.Format} Other=${errStats.Other}. ${hint}`);
+      }
+    }
 
     function updateTrackTags(){
       try{
@@ -138,7 +163,7 @@
           zoomEl.min = caps.zoom.min ?? 1;
           zoomEl.max = caps.zoom.max ?? 5;
           zoomEl.step = caps.zoom.step ?? 0.1;
-          const desired = Math.min(caps.zoom.max ?? 2, Math.max(caps.zoom.min ?? 1, 2));
+          const desired = Math.min(caps.zoom.max ?? 2.5, Math.max(caps.zoom.min ?? 1.5, 2));
           zoomEl.value = currentTrack.getSettings().zoom ?? desired;
           zoomEl.style.display = 'inline-block';
           tagZoom.textContent = `zoom: ${zoomEl.value}`;
@@ -158,29 +183,44 @@
       } catch(e){ log("zoom error", e); }
     });
 
+    // ---- Camera helpers ----
     function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl||''); }
+    function isTeleLabel(lbl){ return /tele|telephoto|2x|3x|5x|10x/i.test(lbl||''); }
     function isBackLabel(lbl){ return /back|rear|environment|тилов|задн/i.test(lbl||''); }
+
+    function rankCamera(label){
+      // 3 — найкраща (telephoto), 2 — звичайна задня, 1 — ultra-wide, 0 — інші
+      if (isTeleLabel(label) && isBackLabel(label)) return 3;
+      if (isBackLabel(label) && !isUltraWideLabel(label)) return 2;
+      if (isUltraWideLabel(label)) return 1;
+      return 0;
+    }
 
     async function enumerateCams(){
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
       log("Devices:", devs.map(d => ({label:d.label, deviceId:d.deviceId, groupId:d.groupId})));
 
+      // render select
       cameraList.innerHTML = devs.map((d,i)=>{
         const lbl = d.label || `Камера ${i+1}`;
-        const tags = [ isUltraWideLabel(lbl) ? 'ultra-wide' : '', isBackLabel(lbl) ? 'back' : '' ].filter(Boolean).join(', ');
+        const tags = [
+          isTeleLabel(lbl) ? 'telephoto' : '',
+          isUltraWideLabel(lbl) ? 'ultra-wide' : '',
+          isBackLabel(lbl) ? 'back' : ''
+        ].filter(Boolean).join(', ');
         const hint = tags ? ` (${tags})` : '';
         return `<option value="${d.deviceId}">${lbl}${hint}</option>`;
       }).join("");
       cameraList.style.display = devs.length > 1 ? "block" : "none";
 
       const savedId = localStorage.getItem("scanner.preferredDeviceId");
-      let preferred = devs.find(d => d.deviceId === savedId)
-                   || devs.find(d => isBackLabel(d.label) && isUltraWideLabel(d.label))
-                   || devs.find(d => isBackLabel(d.label))
-                   || devs[devs.length - 1];
+      let preferred =
+          devs.find(d => d.deviceId === savedId)
+       || devs.filter(d => isBackLabel(d.label)).sort((a,b)=>rankCamera(b.label)-rankCamera(a.label))[0]
+       || devs[devs.length - 1];
 
       chosenBackId = preferred ? preferred.deviceId : (devs[0] && devs[0].deviceId);
-      log("Chosen deviceId:", chosenBackId, "label:", preferred && preferred.label);
+      log("Chosen deviceId:", chosenBackId, "label:", preferred && preferred.label, "rank:", preferred && rankCamera(preferred.label));
       if (chosenBackId) cameraList.value = chosenBackId;
       return {devs, backId: chosenBackId};
     }
@@ -189,13 +229,12 @@
       try {
         const caps = currentTrack?.getCapabilities?.();
         if (!caps) return;
-        // Початковий зум для кращого зчитування
+        // Початковий зум і автофокус
         if (caps.zoom) {
-          const mid = Math.min(caps.zoom.max || 2, Math.max(caps.zoom.min || 1, 2));
+          const mid = Math.min(caps.zoom.max || 2.5, Math.max(caps.zoom.min || 1.5, 2));
           await currentTrack.applyConstraints({ advanced: [{ zoom: mid }] });
           tagZoom.textContent = `zoom: ${mid}`;
         }
-        // Безперервний автофокус
         if (caps.focusMode?.includes?.('continuous')) {
           await currentTrack.applyConstraints({ advanced:[{ focusMode:'continuous' }] });
         }
@@ -216,31 +255,24 @@
         audio: false
       };
 
-      // 1) Старт декодування БЕЗ await, з логами помилок:
+      // 1) Старт декодування БЕЗ await (постійний цикл) + розширене логування
       reader.decodeFromConstraints(constraints, video, (result, err) => {
         if (sentOnce) return;
         if (result){
           const code = String(result.getText()||'').trim();
           const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
-          if (/^[0-9A-Za-z\-]{4,}$/.test(code)) {
-            sentOnce = true;
-            showHit(code);
-            handleCode(code, fmt);
-          } else {
-            log('decoded but unexpected format/value:', code);
-          }
+          sentOnce = true;
+          showHit(code);
+          handleCode(code, fmt);
         } else if (err) {
-          // NotFound — нормальний флоу; інші логуй
-          if (!(err instanceof ZXing.NotFoundException)) {
-            log('decode error:', err?.name || err);
-          }
+          onDecodeError(err);
         }
       });
 
       // 2) Чекаємо появу потоку у <video>, тоді вмикаємо UI
       await (async function waitForStream(){
         let tries = 0;
-        while (!video.srcObject && tries++ < 50) {
+        while (!video.srcObject && tries++ < 60) {
           await new Promise(r => setTimeout(r, 100));
         }
       })();
@@ -293,9 +325,7 @@
                 const code = String(result.getText()||'').trim();
                 const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
                 sentOnce = true; showHit(code); handleCode(code, fmt);
-              } else if (err && !(err instanceof ZXing.NotFoundException)) {
-                log('decodeFromVideoDevice error:', err?.name || err);
-              }
+              } else if (err) { onDecodeError(err); }
             });
             log('fallback decodeFromVideoDevice started');
             const stream = video.srcObject; currentTrack = stream?.getVideoTracks?.()[0] || null;
@@ -315,7 +345,7 @@
               const code = String(result.getText()||'').trim();
               const fmt  = String(result.getBarcodeFormat?.() || 'UNKNOWN');
               showHit(code); handleCode(code, fmt);
-            }).catch(err=>{ log('decodeFromVideoElement error', err?.message||err); });
+            }).catch(err=>{ onDecodeError(err); });
           }
         }
       } catch (e) {
@@ -339,12 +369,24 @@
     function handleCode(code, fmt){
       setStatus(`Зчитано: ${code} (${fmt}). Відправляю в бот…`);
       try { navigator.vibrate && navigator.vibrate(25); } catch(_){}
+
       const payload = JSON.stringify({ t:'barcode', fmt, code });
+
       (async ()=>{
         try{
-          if (tg?.sendData){ tg.sendData(payload); log('tg.sendData sent', payload); setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, 120); }
-          else { await navigator.clipboard?.writeText?.(code); alert(`Код: ${code}\n(Скопійовано у буфер обміну)`); }
-        } finally { await stopAll(); }
+          if (tg?.sendData){
+            let ok = false;
+            try { tg.sendData(payload); ok = true; log('tg.sendData sent', payload); }
+            catch (e) { log('tg.sendData ERROR', e?.message || e); }
+            // Додаткове вікно для iOS, щоб бот встиг прийняти дані
+            setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, ok ? 450 : 700);
+          } else {
+            await navigator.clipboard?.writeText?.(code);
+            alert(`Код: ${code}\n(Скопійовано у буфер обміну)`);
+          }
+        } finally {
+          await stopAll();
+        }
       })();
     }
 
@@ -361,7 +403,9 @@
     });
 
     document.getElementById('btnRestart').addEventListener('click', async () => {
-      await stopAll(); sentOnce = false; await startCamera();
+      await stopAll(); sentOnce = false;
+      errStats.NotFound = errStats.Checksum = errStats.Format = errStats.Other = 0;
+      await startCamera();
     });
 
     cameraList.addEventListener('change', async () => {
@@ -369,7 +413,9 @@
       localStorage.setItem("scanner.preferredDeviceId", id);
       log("Manual camera switch to", id);
       chosenBackId = id;
-      await stopAll(); sentOnce = false; await startCamera();
+      await stopAll(); sentOnce = false;
+      errStats.NotFound = errStats.Checksum = errStats.Format = errStats.Other = 0;
+      await startCamera();
     });
 
     window.addEventListener('beforeunload', stopAll);
