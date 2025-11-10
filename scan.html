@@ -3,35 +3,38 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — multi (auto camera) v1.4</title>
+  <title>Сканер штрих-коду — multi (auto camera) v1.5</title>
   <style>
     :root{color-scheme:dark}
     body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000;color:#fff}
     header{padding:12px 16px;font-weight:600;background:#111;display:flex;gap:8px;align-items:center;justify-content:space-between}
-    #video{width:100%;height:48vh;object-fit:cover;background:#000}
+    #video{width:100%;height:46vh;object-fit:cover;background:#000}
     #bar{display:flex;gap:8px;align-items:center;padding:10px 16px;background:#111;flex-wrap:wrap}
     button{padding:8px 12px;border-radius:10px;border:1px solid #444;background:#1b1b1b;color:#fff;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}
     #status{padding:8px 16px;color:#ccc;background:#111}
     #cameraList{padding:6px 8px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#fff}
-    #log{height:32vh;overflow:auto;background:#0c0c0c;border-top:1px solid #333;font-family:ui-monospace,Consolas,monospace;padding:8px 12px;white-space:pre-wrap}
+    #log{height:24vh;overflow:auto;background:#0c0c0c;border-top:1px solid #333;font-family:ui-monospace,Consolas,monospace;padding:8px 12px;white-space:pre-wrap}
+    #history{height:14vh;overflow:auto;background:#0a0a0a;border-top:1px solid #333;font:12px/1.3 ui-monospace,Consolas,monospace;padding:8px 12px}
     .tag{display:inline-block;margin:2px 4px 2px 0;padding:2px 6px;border:1px solid #444;border-radius:999px;font-size:12px;background:#1b1b1b}
     input[type="range"]{accent-color:#fff}
-    #lastCode{position:absolute;left:0;right:0;top:8px;text-align:center;font:600 18px/1.2 system-ui;color:#0f0;text-shadow:0 0 6px #000}
+    #lastCode{position:absolute;left:0;right:0;top:8px;text-align:center;font:700 22px/1.2 system-ui;color:#00ff91;text-shadow:0 0 8px #000}
+    #tapOverlay{position:absolute;left:0;right:0;top:56px;height:46vh;display:none;align-items:center;justify-content:center;pointer-events:auto;background:rgba(0,0,0,.35)}
   </style>
 </head>
 <body>
   <header>
     <div>Наведи камеру на штрих-код — DEBUG (auto camera)</div>
-    <span class="tag" id="tagVer">v1.4</span>
+    <span class="tag" id="tagVer">v1.5</span>
   </header>
 
   <div id="lastCode"></div>
   <video id="video" playsinline muted autoplay></video>
 
-  <!-- iOS autoplay/touch overlay -->
-  <div id="tapOverlay" style="position:absolute;left:0;right:0;top:56px;height:48vh;display:none;align-items:center;justify-content:center;pointer-events:auto;background:rgba(0,0,0,.35);">
-    <button id="btnTapStart" style="font-size:16px;padding:10px 14px;border-radius:12px;border:1px solid #666;background:#1b1b1b;color:#fff">▶️ Торкнись, щоб увімкнути камеру</button>
+  <div id="tapOverlay">
+    <button id="btnTapStart" style="font-size:16px;padding:10px 14px;border-radius:12px;border:1px solid #666;background:#1b1b1b;color:#fff">
+      ▶️ Торкнись, щоб увімкнути камеру
+    </button>
   </div>
 
   <div id="bar">
@@ -47,18 +50,32 @@
   </div>
 
   <div id="status">Ініціалізація…</div>
+  <div id="history"></div>
   <div id="log"></div>
 
-  <!-- Фіксована версія ZXing (umd) -->
+  <!-- ZXing UMD -->
   <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
-    // ---- Version ----
-    const VERSION = 'v1.4';
+    // --- HTTPS enforcement ---
+    try {
+      if (location.protocol === 'http:' && location.hostname !== 'localhost') {
+        location.replace('https://' + location.host + location.pathname + location.search + location.hash);
+      }
+    } catch (_) {}
+
+    // ---- Tunables ----
+   const VERSION = 'v1.5';
+   const SEND_DELAY_MS  = 350;        // пауза перед першим sendData
+   const CLOSE_DELAY_MS = 120000;     // <— ЗМІНИ ЦЕ: 120000 мс = 2 хв
+   const RETRIES        = 2;
+   const RETRY_GAP_MS   = 400;
 
     // ---- Logger ----
     const logEl = document.getElementById('log');
+    const histEl= document.getElementById('history');
     const logs = [];
+    const history = []; // [{ts, code, fmt, sent:true/false}]
     function log(...args){
       const line = args.map(v => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch { return String(v); } }).join(' ');
       const ts = new Date().toISOString().split('T')[1].replace('Z','');
@@ -66,6 +83,16 @@
       logs.push(msg);
       console.log(msg);
       if (logEl) { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+    }
+    function pushHistory(item){
+      history.unshift(item);
+      while (history.length > 10) history.pop();
+      histEl.innerHTML = history.map(h => {
+        const t = new Date(h.ts).toLocaleTimeString();
+        const sent = h.sent ? '✅' : '⚠️';
+        return `${sent} [${t}] ${h.code} (${h.fmt})`;
+      }).join("\n");
+      histEl.scrollTop = 0;
     }
     window.onerror = (m, s, l, c, e) => log("ERROR", m, s, l, c, e && e.stack);
 
@@ -102,8 +129,7 @@
     function showTapOverlay(show){ tapOverlay.style.display = show ? 'flex' : 'none'; }
     function showHit(code){
       lastCodeEl.textContent = `✓ ${code}`;
-      lastCodeEl.style.color = '#0f0';
-      setTimeout(()=> lastCodeEl.textContent = '', 2500);
+      lastCodeEl.style.color = '#00ff91';
     }
 
     // ---- ZXing setup (multi-format + hints) ----
@@ -124,7 +150,7 @@
     let chosenBackId = null;
     let sentOnce = false;
 
-    // ---- Decode error telemetry (зрозуміти чому не читає) ----
+    // ---- Decode error telemetry ----
     const errStats = { NotFound:0, Checksum:0, Format:0, Other:0 };
     let lastErrLogTs = 0;
     function onDecodeError(err){
@@ -134,15 +160,15 @@
       else if (err instanceof ZXing.FormatException) errStats.Format++;
       else errStats.Other++;
 
-      // лог раз на 1.5с, щоб не спамити
       const now = performance.now();
-      if (now - lastErrLogTs > 1500){
+      if (now - lastErrLogTs > 1200){
         lastErrLogTs = now;
         const hint =
-          errStats.Checksum > errStats.NotFound ? "→ Порада: додай світла/наблизь — збій контрольної суми." :
-          errStats.Format   > errStats.NotFound ? "→ Порада: формат не збігається — перевір, що це EAN/UPC/ITF/Code128." :
-          "→ Порада: немає патерну — тримай рівно, щоб штрихи були горизонтальні, збільш масштаб.";
-        log(`decode stats NotFound=${errStats.NotFound} Checksum=${errStats.Checksum} Format=${errStats.Format} Other=${errStats.Other}. ${hint}`);
+          errStats.Checksum > errStats.NotFound ? "→ Додай світла/прибери бліки." :
+          errStats.Format   > errStats.NotFound ? "→ Схоже не EAN/UPC/ITF/Code128." :
+          "→ Тримай штрихи горизонтально, займи ~70% кадру.";
+        setStatus(`Пошук коду… ${hint}`);
+        log(`decode stats`, JSON.stringify(errStats));
       }
     }
 
@@ -187,9 +213,7 @@
     function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl||''); }
     function isTeleLabel(lbl){ return /tele|telephoto|2x|3x|5x|10x/i.test(lbl||''); }
     function isBackLabel(lbl){ return /back|rear|environment|тилов|задн/i.test(lbl||''); }
-
     function rankCamera(label){
-      // 3 — найкраща (telephoto), 2 — звичайна задня, 1 — ultra-wide, 0 — інші
       if (isTeleLabel(label) && isBackLabel(label)) return 3;
       if (isBackLabel(label) && !isUltraWideLabel(label)) return 2;
       if (isUltraWideLabel(label)) return 1;
@@ -200,7 +224,6 @@
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
       log("Devices:", devs.map(d => ({label:d.label, deviceId:d.deviceId, groupId:d.groupId})));
 
-      // render select
       cameraList.innerHTML = devs.map((d,i)=>{
         const lbl = d.label || `Камера ${i+1}`;
         const tags = [
@@ -229,7 +252,6 @@
       try {
         const caps = currentTrack?.getCapabilities?.();
         if (!caps) return;
-        // Початковий зум і автофокус
         if (caps.zoom) {
           const mid = Math.min(caps.zoom.max || 2.5, Math.max(caps.zoom.min || 1.5, 2));
           await currentTrack.applyConstraints({ advanced: [{ zoom: mid }] });
@@ -255,7 +277,7 @@
         audio: false
       };
 
-      // 1) Старт декодування БЕЗ await (постійний цикл) + розширене логування
+      // Старт декодування (без await)
       reader.decodeFromConstraints(constraints, video, (result, err) => {
         if (sentOnce) return;
         if (result){
@@ -269,13 +291,9 @@
         }
       });
 
-      // 2) Чекаємо появу потоку у <video>, тоді вмикаємо UI
-      await (async function waitForStream(){
-        let tries = 0;
-        while (!video.srcObject && tries++ < 60) {
-          await new Promise(r => setTimeout(r, 100));
-        }
-      })();
+      // Чекаємо потік
+      let tries = 0;
+      while (!video.srcObject && tries++ < 60) { await new Promise(r => setTimeout(r, 100)); }
 
       const stream = video.srcObject;
       currentTrack = stream?.getVideoTracks?.()[0] || null;
@@ -289,21 +307,17 @@
       setupZoomControl();
 
       setStatus('Наводь штрих-код у рамку…');
-
-      // Якщо autoplay заблоковано (iOS), покажемо оверлей
       setTimeout(()=>{ if (!video.srcObject || video.paused || video.readyState < 2){ log('Autoplay blocked: showing tap overlay'); showTapOverlay(true); } }, 300);
     }
 
     async function startCamera(){
       setStatus("Готую камеру…");
       try {
-        // Чекаємо завантаження ZXing
         let tries = 0;
         while ((!window.ZXing || !ZXing.BrowserMultiFormatReader) && tries++ < 20){
           await new Promise(r=>setTimeout(r,100));
         }
 
-        // Пробний доступ (для назв камер у деяких браузерах/iOS)
         try {
           const tmp = await navigator.mediaDevices.getUserMedia({ video:true, audio:false });
           tmp.getTracks().forEach(t=>t.stop());
@@ -317,7 +331,7 @@
           await decodeWithDevice(chosenBackId);
         } catch(e1){
           log('decodeWithDevice failed', e1?.message);
-          // Fallback: decodeFromVideoDevice
+          // Fallback 1
           try {
             reader.decodeFromVideoDevice(chosenBackId, video, (result, err)=>{
               if (sentOnce) return;
@@ -333,7 +347,7 @@
             setStatus('Наводь штрих-код у рамку…');
           } catch(e2){
             log('decodeFromVideoDevice failed', e2?.message);
-            // Fallback: просто потік і декод з елемента
+            // Fallback 2
             const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId:{ exact: chosenBackId } }, audio:false });
             video.srcObject = stream; await video.play().catch(()=>{});
             currentTrack = stream.getVideoTracks()[0];
@@ -368,25 +382,27 @@
 
     function handleCode(code, fmt){
       setStatus(`Зчитано: ${code} (${fmt}). Відправляю в бот…`);
-      try { navigator.vibrate && navigator.vibrate(25); } catch(_){}
+      try { navigator.vibrate && navigator.vibrate(30); } catch(_){}
 
       const payload = JSON.stringify({ t:'barcode', fmt, code });
 
       (async ()=>{
-        try{
-          if (tg?.sendData){
-            let ok = false;
-            try { tg.sendData(payload); ok = true; log('tg.sendData sent', payload); }
-            catch (e) { log('tg.sendData ERROR', e?.message || e); }
-            // Додаткове вікно для iOS, щоб бот встиг прийняти дані
-            setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, ok ? 450 : 700);
-          } else {
-            await navigator.clipboard?.writeText?.(code);
-            alert(`Код: ${code}\n(Скопійовано у буфер обміну)`);
+        let sentOk = false;
+        if (tg?.sendData){
+          // невелика пауза перед першою відправкою
+          await new Promise(r=>setTimeout(r, SEND_DELAY_MS));
+          for (let i=0;i<=RETRIES;i++){
+            try { tg.sendData(payload); sentOk = true; log(i?`tg.sendData retry#${i} sent`:'tg.sendData sent', payload); break; }
+            catch(e){ log(i?`tg.sendData retry#${i} ERROR`:'tg.sendData ERROR', e?.message||e); await new Promise(r=>setTimeout(r, RETRY_GAP_MS)); }
           }
-        } finally {
-          await stopAll();
+          // НЕ закриваємо відразу: даємо користувачу побачити «зелений код»
+          setTimeout(()=>{ try{ tg.close && tg.close(); }catch(_){ } }, CLOSE_DELAY_MS);
+        } else {
+          await navigator.clipboard?.writeText?.(code);
+          alert(`Код: ${code}\n(Скопійовано у буфер обміну)`);
+          sentOk = true;
         }
+        pushHistory({ ts: Date.now(), code, fmt, sent: sentOk });
       })();
     }
 
@@ -405,6 +421,7 @@
     document.getElementById('btnRestart').addEventListener('click', async () => {
       await stopAll(); sentOnce = false;
       errStats.NotFound = errStats.Checksum = errStats.Format = errStats.Other = 0;
+      lastCodeEl.textContent = '';
       await startCamera();
     });
 
@@ -415,12 +432,12 @@
       chosenBackId = id;
       await stopAll(); sentOnce = false;
       errStats.NotFound = errStats.Checksum = errStats.Format = errStats.Other = 0;
+      lastCodeEl.textContent = '';
       await startCamera();
     });
 
     window.addEventListener('beforeunload', stopAll);
 
-    // Auto Start
     (async ()=>{
       log('UA:', navigator.userAgent);
       document.getElementById('tagVer').textContent = VERSION;
@@ -428,7 +445,6 @@
       await startCamera();
     })();
 
-    // Tap overlay handler — явний жест користувача для iOS
     btnTapStart.addEventListener('click', async ()=>{
       showTapOverlay(false);
       if (!video.srcObject) { await startCamera(); }
