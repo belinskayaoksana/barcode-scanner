@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — v2.2 (no-ROI)</title>
+  <title>Сканер штрих-/QR-коду — v2.3 (QR enabled)</title>
   <style>
     :root { color-scheme: dark }
     body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#000; color:#fff }
@@ -18,7 +18,7 @@
     #hint { position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
             font:600 12px/1 system-ui; color:#eee; text-shadow:0 1px 2px #000; opacity:.95; pointer-events:none }
     #lastCode { position:absolute; left:0; right:0; top:8px; text-align:center; font:800 22px/1.2 system-ui;
-                color:#00ff91; text-shadow:0 0 8px #000; pointer-events:none }
+                color:#00ff91; text-shadow:0 0 8px #000; pointer-events:none; word-break:break-all; padding:0 10px }
 
     #toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:24px; background:#1f2328; color:#e6edf3;
             border:1px solid #30363d; padding:10px 14px; border-radius:12px; font-size:14px; opacity:0; pointer-events:none; transition:opacity .2s }
@@ -30,14 +30,14 @@
 </head>
 <body>
   <header>
-    <div>Сканер штрих-коду</div>
-    <span class="tag">v2.2</span>
+    <div>Сканер штрих-/QR-коду</div>
+    <span class="tag">v2.3</span>
   </header>
 
   <div id="stage">
     <video id="video" playsinline muted autoplay></video>
     <div id="lastCode"></div>
-    <div id="hint">Наведи камеру на штрих-код — відправиться автоматично</div>
+    <div id="hint">Наведи камеру на штрих-код або QR — відправиться автоматично</div>
     <div id="tapOverlay"><button id="btnTapStart">▶️ Увімкнути камеру</button></div>
   </div>
 
@@ -49,7 +49,7 @@
 
   <script>
   // ===== Опції =====
-  const STABLE_REPEAT = 2;                 // потрібно 2 однакові читання поспіль для підтвердження
+  const STABLE_REPEAT = 2;                 // 2 однакові читання поспіль — підтвердження
   const SEND_DELAY_MS = 120, RETRIES = 2, RETRY_GAP_MS = 250;
 
   // ===== UI =====
@@ -101,7 +101,7 @@
       const caps=currentTrack.getCapabilities?.(); if(!(caps && 'torch' in caps)) return;
       const c=document.createElement('canvas'), ctx=c.getContext('2d');
       const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return;
-      c.width=160; c.height=90; // маленький сніпет для швидкої оцінки
+      c.width=160; c.height=90;
       ctx.drawImage(video, 0, 0, vw, vh, 0, 0, c.width, c.height);
       const data=ctx.getImageData(0,0,c.width,c.height).data;
       let sum=0; for(let i=0;i<data.length;i+=4){ sum += (data[i]*0.3 + data[i+1]*0.59 + data[i+2]*0.11); }
@@ -112,11 +112,19 @@
 
   // ===== Детектори =====
   const hasNativeBD = 'BarcodeDetector' in window;
-  let bd=null, rafId=null, gotCode=false, lastPayload=null, lastHit={code:'',t:0,times:0};
+  let bd=null, rafId=null, gotCode=false, lastPayload=null, lastHit={code:'',t:0,times:0,fmt:''};
 
   async function ensureBD(){
     if(!hasNativeBD) return null;
-    if(!bd){ bd=new BarcodeDetector({formats:['code_128','ean_13','ean_8','upc_a','itf','code_39','code_93']}); }
+    if(!bd){
+      // ДОДАНО QR
+      bd=new BarcodeDetector({
+        formats:[
+          'qr_code',
+          'code_128','ean_13','ean_8','upc_a','itf','code_39','code_93'
+        ]
+      });
+    }
     return bd;
   }
 
@@ -125,7 +133,7 @@
     if(!code) return;
     const now = performance.now();
     if(code===lastHit.code && (now-lastHit.t)<1200){ lastHit.times+=1; }
-    else { lastHit={code, t:now, times:1}; }
+    else { lastHit={code, t:now, times:1, fmt}; }
     if(lastHit.times>=STABLE_REPEAT){
       gotCode=true; lastPayload={code, fmt};
       lastCodeEl.textContent=`✓ ${code}`;
@@ -135,10 +143,6 @@
     }
   }
 
-  // нативний цикл: detect(video) або через canvas fallback
-  function detectSourceSupported(){
-    try { return true; } catch { return false; }
-  }
   async function nativeLoop(){
     if(!hasNativeBD || !video.srcObject) return;
     const det = await ensureBD(); if(!det) return;
@@ -153,9 +157,11 @@
         }
       }
       if(res && res.length){
+        // беремо найбільшу детекцію
         res.sort((a,b)=>(b.boundingBox?.width||0)-(a.boundingBox?.width||0));
         const raw = res[0].rawValue;
-        if(raw) acceptCandidate(raw,'NATIVE');
+        const fmt = (res[0].format || 'NATIVE').toString().toUpperCase();
+        if(raw) acceptCandidate(raw, fmt);
       } else {
         autoTorchIfDark();
       }
@@ -164,14 +170,15 @@
   }
   function stopNativeLoop(){ if(rafId) cancelAnimationFrame(rafId), rafId=null; }
 
-  // ZXing fallback
+  // ZXing fallback (ДОДАНО QR_CODE у формати)
   const hints=new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
+    ZXing.BarcodeFormat.QR_CODE,
     ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8, ZXing.BarcodeFormat.UPC_A,
     ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.CODE_93
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  const reader=new ZXing.BrowserMultiFormatReader(hints, 280);
+  const reader=new ZXing.BrowserMultiFormatReader(hints, 300);
 
   async function decodeWithDevice(deviceId){
     const constraints={ video:{ deviceId: deviceId?{exact:deviceId}:undefined, facingMode:{ideal:'environment'},
@@ -181,7 +188,9 @@
       if(gotCode) return;
       if(result){
         const code=String(result.getText()||'').trim();
-        const fmt=String(result.getBarcodeFormat?.()||'ZXING');
+        // Спроба витягнути назву формату (в т.ч. QR_CODE)
+        let fmt='ZXING';
+        try{ fmt = String(result.getBarcodeFormat?.()||'ZXING'); }catch{}
         if(code) acceptCandidate(code, fmt);
       }
     });
@@ -216,8 +225,17 @@
   }
 
   // ===== Відправлення у Telegram і закриття =====
+  function isQRFormat(fmt){
+    const f=(fmt||'').toString().toUpperCase();
+    return f.includes('QR');
+  }
+
   async function sendAndClose(){
-    const payload = JSON.stringify({ t:'barcode', fmt:lastPayload.fmt, code:lastPayload.code });
+    const payload = JSON.stringify({
+      t: isQRFormat(lastPayload.fmt) ? 'qrcode' : 'barcode',
+      fmt: lastPayload.fmt,
+      code: lastPayload.code
+    });
     let sent=false;
     if(tg?.sendData){
       await new Promise(r=>setTimeout(r,SEND_DELAY_MS));
