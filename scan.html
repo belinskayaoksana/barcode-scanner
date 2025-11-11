@@ -3,18 +3,16 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-/QR-коду — v2.5 (monitor-friendly)</title>
+  <title>Сканер штрих-/QR-коду — v2.5 (triple-engine)</title>
   <style>
     :root { color-scheme: dark }
     body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#000; color:#fff }
     header { padding:12px 16px; font-weight:600; background:#111; display:flex; justify-content:space-between; align-items:center }
     .tag { padding:2px 8px; border:1px solid #2d2d2d; border-radius:999px; font-size:12px; background:#1b1b1b; color:#cfcfcf }
 
-    /* frame */
     #stage { position:relative; height:56vh; background:#000; overflow:hidden }
     #video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000 }
 
-    /* overlays */
     #hint { position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
             font:600 12px/1 system-ui; color:#eee; text-shadow:0 1px 2px #000; opacity:.95; pointer-events:none }
     #lastCode { position:absolute; left:0; right:0; top:8px; text-align:center; font:800 22px/1.25 system-ui;
@@ -31,7 +29,7 @@
 <body>
   <header>
     <div>Сканер штрих-/QR-коду</div>
-    <span class="tag">v2.4.1</span>
+    <span class="tag">v2.5</span>
   </header>
 
   <div id="stage">
@@ -45,20 +43,26 @@
 
   <!-- libs -->
   <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <script>
   // ===== Опції =====
-  const STABLE_REPEAT = 2;                           // скільки однакових читань для підтвердження
+  const STABLE_REPEAT = 2;
   const SEND_DELAY_MS = 120, RETRIES = 2, RETRY_GAP_MS = 250;
-  const BRIGHTNESS_LOW = 55;                         // поріг темряви для автоліхтарика
-  const NO_HIT_MS = 800;                             // якщо не було детекцій довше — допускаємо підсвітку
-  const TORCH_COOLDOWN_MS = 1200;                    // анти-флікер між перемиканнями
+  const BRIGHTNESS_LOW = 55;
+  const NO_HIT_MS = 900;
+  const TORCH_COOLDOWN_MS = 1200;
 
-  // Налаштування для читання з монітора/всередині Telegram
-  const DEBUG = false;                 // true -> додатковий тост з параметрами відео
-  const FORCE_ZXING = true;            // true -> вимикає нативний BarcodeDetector, лишає ZXing (краще для QR з екрана)
-  const ZXING_SCAN_INTERVAL_MS = 120;  // період скану ZXing (менший -> частіше)
+  // Режими під монітор/Telegram
+  const DEBUG = false;
+  const FORCE_ZXING = true;                // залишаємо ZXing основним
+  const ENABLE_JSQR_FALLBACK = true;       // третій двигун — jsQR (центр-ROI)
+  const ZXING_SCAN_INTERVAL_MS = 110;
+
+  // Монітор-режим: агресивний автоzoom, вимкн. ліхтарика на яскравих кадрах
+  const MONITOR_BRIGHTNESS = 75;           // якщо середня яскравість ≥ 75 — схоже на екран
+  const MONITOR_ZOOM = 2.9;                // бажаний зум для дрібних QR з монітора
 
   // ===== UI =====
   const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -104,6 +108,14 @@
     }catch{}
   }
 
+  async function setZoom(value){
+    try{
+      const caps=currentTrack?.getCapabilities?.(); if(!(caps&&caps.zoom)) return;
+      const v = Math.min(caps.zoom.max, Math.max(caps.zoom.min, value));
+      await currentTrack.applyConstraints({ advanced:[{ zoom: v }] });
+    }catch{}
+  }
+
   async function setTorch(on){
     try{
       if(!currentTrack || !torch.supported) return;
@@ -113,9 +125,7 @@
       await currentTrack.applyConstraints({ advanced:[{ torch: !!on }] });
       torch.on = !!on;
       torch.lastToggle = now;
-    }catch{
-      // ігноруємо — деякі webview кидають DOMException
-    }
+    }catch{}
   }
 
   function estimateBrightness(){
@@ -130,22 +140,21 @@
     }catch{ return null }
   }
 
-  async function smartTorchManager(){
-    if(!torch.supported) return;
+  async function smartTorchAndMonitor(){
     const bright = estimateBrightness();
     if(bright==null) return;
 
-    // Екран монітора зазвичай дуже яскравий — не підсвічуємо
-    if(bright >= 75){ await setTorch(false); return; }
-
+    // Монітор: дуже яскраво -> вимкнути ліхтарик і дати зум
+    if(bright >= MONITOR_BRIGHTNESS){
+      await setTorch(false);
+      await setZoom(MONITOR_ZOOM);
+      return;
+    }
+    // Темно і довго не було попадань -> підсвітити
     const now = performance.now();
     const recentlyDetected = (now - lastDetectTs) <= NO_HIT_MS;
-
-    if(!recentlyDetected && bright < BRIGHTNESS_LOW){
-      await setTorch(true);   // темно + давно немає попадань
-    } else {
-      await setTorch(false);  // світло або були попадання
-    }
+    if(!recentlyDetected && bright < BRIGHTNESS_LOW) await setTorch(true);
+    else await setTorch(false);
   }
 
   // ===== Детектори =====
@@ -179,7 +188,7 @@
       stopNativeLoop();
       sendAndClose();
     }else{
-      lastDetectTs = now; // часткове попадання — теж сигнал активності
+      lastDetectTs = now;
     }
   }
 
@@ -189,7 +198,7 @@
     try{
       let res = await det.detect(video);
       if((!res || !res.length)){
-        // fallback через canvas з ROI по центру (70% площі) — краще для QR з екрана
+        // Canvas ROI по центру (70%)
         const c=document.createElement('canvas'), ctx=c.getContext('2d');
         const vw=video.videoWidth, vh=video.videoHeight; if(vw&&vh){
           const rw = Math.floor(vw * 0.7), rh = Math.floor(vh * 0.7);
@@ -204,15 +213,15 @@
         const fmt = (res[0].format || 'NATIVE').toString().toUpperCase();
         if(raw) acceptCandidate(raw, fmt);
       }
-      if(!gotCode) await smartTorchManager();
+      if(!gotCode) await smartTorchAndMonitor();
     }catch{
-      if(!gotCode) await smartTorchManager();
+      if(!gotCode) await smartTorchAndMonitor();
     }
     rafId = requestAnimationFrame(nativeLoop);
   }
   function stopNativeLoop(){ if(rafId) cancelAnimationFrame(rafId), rafId=null; }
 
-  // ZXing fallback (включно з QR та 2D форматами)
+  // ZXing fallback (+ ALSO_INVERTED для “світлих”/негативних QR)
   const hints=new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
     ZXing.BarcodeFormat.QR_CODE,
@@ -221,7 +230,29 @@
     ZXing.BarcodeFormat.CODABAR, ZXing.BarcodeFormat.DATA_MATRIX, ZXing.BarcodeFormat.PDF_417, ZXing.BarcodeFormat.AZTEC
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
+  hints.set(ZXing.DecodeHintType.ALSO_INVERTED,true);
   const reader=new ZXing.BrowserMultiFormatReader(hints, ZXING_SCAN_INTERVAL_MS);
+
+  // jsQR fallback (центр-ROI 70%, працює добре з екранами)
+  let jsqrTimer=null;
+  function startJsqrLoop(){
+    if(!ENABLE_JSQR_FALLBACK) return;
+    if(jsqrTimer) return;
+    jsqrTimer = setInterval(()=>{
+      if(gotCode) return;
+      try{
+        const vw=video.videoWidth, vh=video.videoHeight; if(!(vw&&vh)) return;
+        const rw=Math.floor(vw*0.7), rh=Math.floor(vh*0.7);
+        const rx=Math.floor((vw-rw)/2), ry=Math.floor((vh-rh)/2);
+        const c=document.createElement('canvas'), ctx=c.getContext('2d',{willReadFrequently:true});
+        c.width=rw; c.height=rh; ctx.drawImage(video,rx,ry,rw,rh,0,0,rw,rh);
+        const img=ctx.getImageData(0,0,rw,rh);
+        const qr = jsQR(img.data, rw, rh, { inversionAttempts: "attemptBoth" });
+        if(qr && qr.data){ acceptCandidate(qr.data, 'JSQR'); }
+      }catch{}
+    }, 120);
+  }
+  function stopJsqrLoop(){ if(jsqrTimer){ clearInterval(jsqrTimer); jsqrTimer=null; } }
 
   async function decodeWithDevice(deviceId){
     const constraints={
@@ -245,7 +276,6 @@
       }
     });
 
-    // очікуємо появу потоку
     let tries=0; while(!video.srcObject && tries++<60){ await new Promise(r=>setTimeout(r,100)) }
     const stream=video.srcObject; currentTrack=stream?.getVideoTracks?.()[0]||null;
     await tuneConstraints();
@@ -254,6 +284,8 @@
     setTimeout(()=>{ if(!video.srcObject || video.paused || video.readyState<2){ tapOverlay.style.display='flex'; } }, 300);
 
     if(hasNativeBD){ stopNativeLoop(); nativeLoop(); }
+    startJsqrLoop();
+
     toast('Камеру увімкнено');
     try{ localStorage.setItem("scanner.preferredDeviceId", deviceId||''); }catch{}
 
@@ -269,7 +301,7 @@
 
   async function startCamera(){
     try{
-      // warm-up: потрібен для появи label у enumerateDevices
+      // warm-up
       try{ const tmp=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); tmp.getTracks().forEach(t=>t.stop()) }catch{}
       await enumerateCams(); if(!chosenBackId) throw new Error('Не знайдено відеокамери');
       await decodeWithDevice(chosenBackId);
@@ -281,6 +313,7 @@
 
   async function stopAll(){
     try{ reader.reset(); }catch{}
+    stopJsqrLoop();
     try{ await setTorch(false); }catch{}
     try{ await video.pause(); }catch{}
     const s=video.srcObject; if(s?.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch{} });
@@ -310,6 +343,7 @@
   }
 
   // ===== Життєвий цикл =====
+  const btnTapStart = document.getElementById('btnTapStart');
   btnTapStart.onclick = async ()=>{ tapOverlay.style.display='none'; if(!video.srcObject){ await startCamera() } try{ await video.play() }catch{} };
   (async()=>{ video.setAttribute('playsinline',''); video.muted=true; await startCamera() })();
   window.addEventListener('visibilitychange', ()=>{ if(document.hidden) setTorch(false) });
