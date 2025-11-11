@@ -3,43 +3,44 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-коду — v2.1</title>
+  <title>Сканер штрих-коду — v2.2 (no-ROI)</title>
   <style>
     :root { color-scheme: dark }
     body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#000; color:#fff }
     header { padding:12px 16px; font-weight:600; background:#111; display:flex; justify-content:space-between; align-items:center }
-    .tag{ padding:2px 8px; border:1px solid #2d2d2d; border-radius:999px; font-size:12px; background:#1b1b1b; color:#cfcfcf }
-    #video { width:100%; height:54vh; object-fit:cover; background:#000 }
+    .tag { padding:2px 8px; border:1px solid #2d2d2d; border-radius:999px; font-size:12px; background:#1b1b1b; color:#cfcfcf }
 
-    /* ROI */
-    #roiMask{ position:absolute; inset:56px 0 auto 0; height:54vh; pointer-events:none }
-    .hole{ position:absolute; border:3px dashed rgba(255,255,255,.9); border-radius:14px; box-shadow:0 0 0 9999px rgba(0,0,0,.35) }
-    #hint{ position:absolute; left:50%; transform:translateX(-50%); top:calc(56px + 54vh - 28px);
-           font:600 12px/1 system-ui; color:#eee; text-shadow:0 1px 2px #000; opacity:.95 }
+    /* full-frame preview */
+    #stage { position:relative; height:56vh; background:#000; overflow:hidden }
+    #video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000 }
 
-    #lastCode{ position:absolute; left:0; right:0; top:8px; text-align:center; font:800 22px/1.2 system-ui;
-               color:#00ff91; text-shadow:0 0 8px #000 }
+    /* overlays */
+    #hint { position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
+            font:600 12px/1 system-ui; color:#eee; text-shadow:0 1px 2px #000; opacity:.95; pointer-events:none }
+    #lastCode { position:absolute; left:0; right:0; top:8px; text-align:center; font:800 22px/1.2 system-ui;
+                color:#00ff91; text-shadow:0 0 8px #000; pointer-events:none }
 
     #toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:24px; background:#1f2328; color:#e6edf3;
             border:1px solid #30363d; padding:10px 14px; border-radius:12px; font-size:14px; opacity:0; pointer-events:none; transition:opacity .2s }
     #toast.show{ opacity:1 }
 
-    #tapOverlay{ position:absolute; left:0; right:0; top:56px; height:54vh; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.35) }
+    #tapOverlay{ position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.35) }
     #tapOverlay button{ font-size:16px; padding:12px 16px; border-radius:12px; border:1px solid #2b2b2b; background:#1a1a1a; color:#fff }
   </style>
 </head>
 <body>
   <header>
     <div>Сканер штрих-коду</div>
-    <span class="tag">v2.1</span>
+    <span class="tag">v2.2</span>
   </header>
 
-  <div id="lastCode"></div>
-  <video id="video" playsinline muted autoplay></video>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="lastCode"></div>
+    <div id="hint">Наведи камеру на штрих-код — відправиться автоматично</div>
+    <div id="tapOverlay"><button id="btnTapStart">▶️ Увімкнути камеру</button></div>
+  </div>
 
-  <div id="roiMask"><div id="roi" class="hole"></div></div>
-  <div id="hint">Наведи код у рамку — відправиться автоматично</div>
-  <div id="tapOverlay"><button id="btnTapStart">▶️ Увімкнути камеру</button></div>
   <div id="toast"></div>
 
   <!-- libs -->
@@ -47,8 +48,8 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <script>
-  // ===== Параметри =====
-  const STABLE_REPEAT = 2;                // потрібно 2 однакові читання поспіль
+  // ===== Опції =====
+  const STABLE_REPEAT = 2;                 // потрібно 2 однакові читання поспіль для підтвердження
   const SEND_DELAY_MS = 120, RETRIES = 2, RETRY_GAP_MS = 250;
 
   // ===== UI =====
@@ -56,44 +57,13 @@
   if (tg) { tg.expand(); tg.ready && tg.ready(); }
 
   const video = document.getElementById('video');
-  const roiEl = document.getElementById('roi');
-  const lastCodeEl = document.getElementById('lastCode');
   const hintEl = document.getElementById('hint');
-  const toastEl = document.getElementById('toast');
+  const lastCodeEl = document.getElementById('lastCode');
   const tapOverlay = document.getElementById('tapOverlay');
   const btnTapStart = document.getElementById('btnTapStart');
+  const toastEl = document.getElementById('toast');
 
   function toast(t, ms=1200){ toastEl.textContent=t; toastEl.classList.add('show'); setTimeout(()=>toastEl.classList.remove('show'), ms); }
-
-  // ROI: динамічний під орієнтацію
-  function currentROI(){
-    const portrait = window.innerHeight > window.innerWidth;
-    return portrait ? { x:0.08, y:0.28, w:0.84, h:0.46 }   // портрет
-                    : { x:0.08, y:0.34, w:0.84, h:0.40 };  // ландшафт
-  }
-  let ROI = currentROI();
-
-  function placeROI(){
-    ROI = currentROI();
-    const vh = document.documentElement.clientHeight * 0.54;
-    const vw = document.documentElement.clientWidth;
-    const left = Math.round(ROI.x * vw);
-    const top  = Math.round(ROI.y * vh + 56);
-    const width = Math.round(ROI.w * vw);
-    const height= Math.round(ROI.h * vh);
-    roiEl.style.left = left+'px';
-    roiEl.style.top  = top +'px';
-    roiEl.style.width= width+'px';
-    roiEl.style.height= height+'px';
-  }
-  function refreshHint(){
-    const portrait = window.innerHeight > window.innerWidth;
-    hintEl.textContent = portrait
-      ? 'Тримай телефон вертикально, штрихи — вертикальні у рамці'
-      : 'Тримай телефон горизонтально, штрихи — вертикальні у рамці';
-  }
-  addEventListener('resize', ()=>{ placeROI(); refreshHint(); });
-  placeROI(); refreshHint();
 
   // ===== Камера =====
   let currentTrack=null, chosenBackId=null;
@@ -117,7 +87,6 @@
       const caps=currentTrack?.getCapabilities?.(); if(!caps) return;
       if(caps.focusMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});
       if(caps.exposureMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{exposureMode:'continuous'}]});
-      // агресивніший зум
       if(caps?.zoom){
         const want = Math.min(caps.zoom.max ?? 3.5, Math.max(caps.zoom.min ?? 1.8, 2.6));
         await currentTrack.applyConstraints({ advanced:[{ zoom: want }] });
@@ -125,25 +94,20 @@
     }catch{}
   }
 
-  // Оцінка яскравості ROI і автоторч
+  // Оцінка яскравості кадру і автоторч
   async function autoTorchIfDark(){
     try{
       if(!currentTrack) return;
       const caps=currentTrack.getCapabilities?.(); if(!(caps && 'torch' in caps)) return;
-      const c = cropROIToCanvas(); if(!c) return;
-      const ctx=c.getContext('2d'), img=ctx.getImageData(0,0,c.width,c.height).data;
-      let sum=0; for(let i=0;i<img.length;i+=4){ sum += (img[i]*0.3 + img[i+1]*0.59 + img[i+2]*0.11); }
-      const avg = sum / (img.length/4);
+      const c=document.createElement('canvas'), ctx=c.getContext('2d');
+      const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return;
+      c.width=160; c.height=90; // маленький сніпет для швидкої оцінки
+      ctx.drawImage(video, 0, 0, vw, vh, 0, 0, c.width, c.height);
+      const data=ctx.getImageData(0,0,c.width,c.height).data;
+      let sum=0; for(let i=0;i<data.length;i+=4){ sum += (data[i]*0.3 + data[i+1]*0.59 + data[i+2]*0.11); }
+      const avg = sum / (data.length/4);
       if(avg < 55){ await currentTrack.applyConstraints({advanced:[{torch:true}]}); }
     }catch{}
-  }
-
-  // ROI кадр
-  function cropROIToCanvas(){
-    const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return null;
-    const rx=Math.round(ROI.x*vw), ry=Math.round(ROI.y*vh), rw=Math.round(ROI.w*vw), rh=Math.round(ROI.h*vh);
-    const c=document.createElement('canvas'), ctx=c.getContext('2d'); c.width=rw; c.height=rh;
-    ctx.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh); return c;
   }
 
   // ===== Детектори =====
@@ -171,22 +135,31 @@
     }
   }
 
+  // нативний цикл: detect(video) або через canvas fallback
+  function detectSourceSupported(){
+    try { return true; } catch { return false; }
+  }
   async function nativeLoop(){
     if(!hasNativeBD || !video.srcObject) return;
     const det = await ensureBD(); if(!det) return;
-    const c = cropROIToCanvas();
-    if(c){
-      try{
-        const res = await det.detect(c);
-        if(res && res.length){
-          res.sort((a,b)=>(b.boundingBox?.width||0)-(a.boundingBox?.width||0));
-          const raw = res[0].rawValue;
-          if(raw) acceptCandidate(raw,'NATIVE');
-        } else {
-          autoTorchIfDark(); // пробуємо підсвітити, якщо нічого не бачить
+    try{
+      let res = await det.detect(video);
+      if((!res || !res.length)){
+        // fallback через canvas (деякі WebView краще працюють так)
+        const c=document.createElement('canvas'), ctx=c.getContext('2d');
+        const vw=video.videoWidth, vh=video.videoHeight; if(vw&&vh){
+          c.width=vw; c.height=vh; ctx.drawImage(video,0,0);
+          res = await det.detect(c);
         }
-      }catch{}
-    }
+      }
+      if(res && res.length){
+        res.sort((a,b)=>(b.boundingBox?.width||0)-(a.boundingBox?.width||0));
+        const raw = res[0].rawValue;
+        if(raw) acceptCandidate(raw,'NATIVE');
+      } else {
+        autoTorchIfDark();
+      }
+    }catch{}
     rafId = requestAnimationFrame(nativeLoop);
   }
   function stopNativeLoop(){ if(rafId) cancelAnimationFrame(rafId), rafId=null; }
@@ -198,7 +171,7 @@
     ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.ITF, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.CODE_93
   ]);
   hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  const reader=new ZXing.BrowserMultiFormatReader(hints, 300);
+  const reader=new ZXing.BrowserMultiFormatReader(hints, 280);
 
   async function decodeWithDevice(deviceId){
     const constraints={ video:{ deviceId: deviceId?{exact:deviceId}:undefined, facingMode:{ideal:'environment'},
@@ -216,9 +189,10 @@
     let tries=0; while(!video.srcObject && tries++<60){ await new Promise(r=>setTimeout(r,100)) }
     const stream=video.srcObject; currentTrack=stream?.getVideoTracks?.()[0]||null;
     await tuneConstraints(); await autoTorchIfDark();
-    if(video.paused){ try{ await video.play() }catch{} }
 
+    if(video.paused){ try{ await video.play() }catch{} }
     setTimeout(()=>{ if(!video.srcObject || video.paused || video.readyState<2){ tapOverlay.style.display='flex'; } }, 300);
+
     if(hasNativeBD){ stopNativeLoop(); nativeLoop(); }
   }
 
