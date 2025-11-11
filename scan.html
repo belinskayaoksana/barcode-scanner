@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-/QR-коду — v2.5 (triple-engine)</title>
+  <title>Сканер штрих-/QR-коду — v2.5.2 (fix & mild zoom)</title>
   <style>
     :root { color-scheme: dark }
     body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#000; color:#fff }
@@ -29,7 +29,7 @@
 <body>
   <header>
     <div>Сканер штрих-/QR-коду</div>
-    <span class="tag">v2.5</span>
+    <span class="tag">v2.5.2</span>
   </header>
 
   <div id="stage">
@@ -54,15 +54,17 @@
   const NO_HIT_MS = 900;
   const TORCH_COOLDOWN_MS = 1200;
 
-  // Режими під монітор/Telegram
+  // Режими
   const DEBUG = false;
-  const FORCE_ZXING = true;                // залишаємо ZXing основним
-  const ENABLE_JSQR_FALLBACK = true;       // третій двигун — jsQR (центр-ROI)
+  const FORCE_ZXING = true;                // ZXing основний; нативний детектор вимкнений за замовчуванням
+  const ENABLE_JSQR_FALLBACK = true;       // третій двигун — jsQR
   const ZXING_SCAN_INTERVAL_MS = 110;
 
-  // Монітор-режим: агресивний автоzoom, вимкн. ліхтарика на яскравих кадрах
-  const MONITOR_BRIGHTNESS = 75;           // якщо середня яскравість ≥ 75 — схоже на екран
-  const MONITOR_ZOOM = 2.9;                // бажаний зум для дрібних QR з монітора
+  // М'який monitor-режим
+  const MONITOR_BRIGHTNESS = 75;           // яскраво -> схоже на екран
+  const TARGET_MONITOR_ZOOM = 1.9;         // м'який зум
+  const MAX_AUTO_ZOOM = 2.2;               // жорстка “стеля” для автозуму
+  const ZOOM_EPS = 0.08;                   // мертвий хід (щоб не смикалось)
 
   // ===== UI =====
   const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
@@ -71,14 +73,14 @@
   const video = document.getElementById('video');
   const lastCodeEl = document.getElementById('lastCode');
   const tapOverlay = document.getElementById('tapOverlay');
-  const btnTapStart = document.getElementById('btnTapStart');
+  const btnTapStart = document.getElementById('btnTapStart'); // <— ЄДИНЕ оголошення
   const toastEl = document.getElementById('toast');
 
   function toast(t, ms=1200){ toastEl.textContent=t; toastEl.classList.add('show'); setTimeout(()=>toastEl.classList.remove('show'), ms); }
 
   // ===== Камера / Torch =====
   let currentTrack=null, chosenBackId=null;
-  let lastDetectTs = 0;
+  let lastDetectTs = 0, monitorZoomApplied = false;
   const torch = { supported:false, on:false, lastToggle:0 };
 
   function isUltraWideLabel(lbl){ return /ultra|ultra[- ]?wide|uw|0\.5x|0,5x|надшир/i.test(lbl||'') }
@@ -102,16 +104,20 @@
       if(caps.focusMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{focusMode:'continuous'}]});
       if(caps.exposureMode?.includes?.('continuous')) await currentTrack.applyConstraints({advanced:[{exposureMode:'continuous'}]});
       if(caps?.zoom){
-        const want = Math.min(caps.zoom.max ?? 3.5, Math.max(caps.zoom.min ?? 1.8, 2.6));
-        await currentTrack.applyConstraints({ advanced:[{ zoom: want }] });
+        // початковий базовий зум — легкий (1.6–1.9), не агресивний
+        const base = Math.min(MAX_AUTO_ZOOM, Math.max(caps.zoom.min ?? 1.0, 1.7));
+        await currentTrack.applyConstraints({ advanced:[{ zoom: base }] });
       }
     }catch{}
   }
 
+  function approxEqual(a,b,eps=ZOOM_EPS){ return Math.abs((a||0)-(b||0))<=eps; }
+
   async function setZoom(value){
     try{
       const caps=currentTrack?.getCapabilities?.(); if(!(caps&&caps.zoom)) return;
-      const v = Math.min(caps.zoom.max, Math.max(caps.zoom.min, value));
+      let v = Math.min(Math.min(caps.zoom.max, MAX_AUTO_ZOOM), Math.max(caps.zoom.min||1.0, value));
+      const s=currentTrack?.getSettings?.(); if(s?.zoom!=null && approxEqual(s.zoom, v)) return;
       await currentTrack.applyConstraints({ advanced:[{ zoom: v }] });
     }catch{}
   }
@@ -144,12 +150,15 @@
     const bright = estimateBrightness();
     if(bright==null) return;
 
-    // Монітор: дуже яскраво -> вимкнути ліхтарик і дати зум
+    // Монітор: дуже яскраво -> вимкнути ліхтарик і один раз м'яко підкрутити зум
     if(bright >= MONITOR_BRIGHTNESS){
       await setTorch(false);
-      await setZoom(MONITOR_ZOOM);
+      if(!monitorZoomApplied){ await setZoom(TARGET_MONITOR_ZOOM); monitorZoomApplied = true; }
       return;
+    } else {
+      monitorZoomApplied = false; // повернути дозвіл на наступне одноразове застосування
     }
+
     // Темно і довго не було попадань -> підсвітити
     const now = performance.now();
     const recentlyDetected = (now - lastDetectTs) <= NO_HIT_MS;
@@ -221,7 +230,7 @@
   }
   function stopNativeLoop(){ if(rafId) cancelAnimationFrame(rafId), rafId=null; }
 
-  // ZXing fallback (+ ALSO_INVERTED для “світлих”/негативних QR)
+  // ZXing fallback (QR + 1D + 2D), інверсії для “світлих” QR
   const hints=new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
     ZXing.BarcodeFormat.QR_CODE,
@@ -233,7 +242,7 @@
   hints.set(ZXing.DecodeHintType.ALSO_INVERTED,true);
   const reader=new ZXing.BrowserMultiFormatReader(hints, ZXING_SCAN_INTERVAL_MS);
 
-  // jsQR fallback (центр-ROI 70%, працює добре з екранами)
+  // jsQR fallback (центр-ROI 70%)
   let jsqrTimer=null;
   function startJsqrLoop(){
     if(!ENABLE_JSQR_FALLBACK) return;
@@ -259,8 +268,8 @@
       video:{
         deviceId: deviceId ? { exact: deviceId } : undefined,
         facingMode:{ ideal:'environment' },
-        width:{ ideal:1920, min:1280 },
-        height:{ ideal:1440, min:720 },
+        width:{ ideal:1920, min:1280 },      // FullHD — достатньо для QR з монітора
+        height:{ ideal:1080, min:720 },
         frameRate:{ ideal:30 },
         advanced:[ {focusMode:'continuous'}, {exposureMode:'continuous'} ]
       },
@@ -343,7 +352,6 @@
   }
 
   // ===== Життєвий цикл =====
-  const btnTapStart = document.getElementById('btnTapStart');
   btnTapStart.onclick = async ()=>{ tapOverlay.style.display='none'; if(!video.srcObject){ await startCamera() } try{ await video.play() }catch{} };
   (async()=>{ video.setAttribute('playsinline',''); video.muted=true; await startCamera() })();
   window.addEventListener('visibilitychange', ()=>{ if(document.hidden) setTorch(false) });
