@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Ultra‑Fast Scanner — 1D + QR (v1.5 core‑ZXing, ROI, debug)</title>
+  <title>Ultra‑Fast Scanner — 1D + QR (v1.6 WebApp‑fix, ROI, debug)</title>
   <!-- Force fresh load to avoid Telegram WebView cache -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -31,19 +31,18 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація камери…</div>
-    <div id="tag">Ultra‑Fast Scanner v1.5</div>
+    <div id="tag">Ultra‑Fast Scanner v1.6</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.5';
+    const VERSION = '1.6';
     const INVENTORY_API_URL = ""; // бекенд / Apps Script, якщо НЕ відкрито як Telegram WebApp
     const API_TOKEN = "";
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
-    // Підтримувані формати для нативного детектора (якщо є)
     const BARCODE_FORMATS_NATIVE = [
       'qr_code','code_39','code_93','code_128','ean_13','ean_8','upc_a','upc_e','itf','codabar','data_matrix','pdf417'
     ];
@@ -71,6 +70,23 @@
       }catch(e){ log('CACHE','skip '+(e.message||e)); }
     })();
 
+    // ---- Надійне визначення Telegram WebApp ----
+    function getTG(){
+      try{
+        const tg = (window.Telegram?.WebApp) || (window.parent?.Telegram?.WebApp) || (window.opener?.Telegram?.WebApp);
+        if(tg){
+          try{ tg.ready?.(); }catch(_){/*no-op*/}
+          log('TG','WebApp detected: yes');
+          log('TG','initDataLen='+(tg.initData?.length||0)+' platform='+(tg.platform||'unknown'));
+          return tg;
+        }
+      }catch(e){ log('TG','error '+(e.message||e)); }
+      log('TG','WebApp detected: NO');
+      return null;
+    }
+
+    let TG = null;
+
     let lastSent = { value: '', at: 0 };
     function shouldSend(v){ const n=Date.now(); if(v===lastSent.value && (n-lastSent.at)<4000) return false; lastSent={value:v,at:n}; return true; }
 
@@ -79,12 +95,16 @@
         if(!shouldSend(code)) return;
         navigator.vibrate?.(VIBRATE_MS);
         status(`Знайдено: ${code} → надсилаю…`);
-        if(window?.Telegram?.WebApp){
-          window.Telegram.WebApp.HapticFeedback?.impactOccurred?.('light');
-          window.Telegram.WebApp.sendData(JSON.stringify({action:'handleScan',code}));
-          window.Telegram.WebApp.close();
+
+        TG = TG || getTG();
+        if(TG){
+          TG.HapticFeedback?.impactOccurred?.('light');
+          TG.sendData?.(JSON.stringify({action:'handleScan',code}));
+          // Якщо Telegram не закриває сам — дамо підказку в лог
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 60);
           return;
         }
+
         if(INVENTORY_API_URL){
           const headers={'Content-Type':'application/json'}; if(API_TOKEN) headers['X-API-KEY']=API_TOKEN;
           const r=await fetch(INVENTORY_API_URL,{method:'POST',headers,body:JSON.stringify({action:'handleScan',source:'web_scanner',code})});
@@ -167,22 +187,17 @@
         if(!ZX){ log('ZX','not loaded'); return null; }
         const frame=grabRoi(); if(!frame) return null;
         const {imageData, rw, rh}=frame;
-        // Перетворимо у масив яскравостей
         const luminances = new Uint8ClampedArray(rw*rh);
-        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // беремо Red як люмінанс
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i];
         const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
         const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
         const reader = new ZX.MultiFormatReader();
-        const hints = new Map();
-        hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+        const hints = new Map(); hints.set(ZX.DecodeHintType.TRY_HARDER, true);
         reader.setHints?.(hints);
         const result = reader.decode(bitmap);
         if(result && result.getText){ return String(result.getText()).trim(); }
         return null;
-      }catch(e){
-        // ZXing кидає NotFoundException коли коду нема — це нормально
-        return null;
-      }
+      }catch(e){ return null; }
     }
 
     async function loopScanNative(){
@@ -202,6 +217,7 @@
     (async()=>{
       try{
         await startCamera();
+        TG = getTG(); // одразу перевіримо присутність WebApp
         const okNative = await setupNative();
         if(okNative){ status('Скануйте… (native)'); requestAnimationFrame(loopScanNative); }
         else { status('Скануйте… (ZX core)'); loopScanZXcore(); }
