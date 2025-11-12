@@ -1,18 +1,19 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Smart Scanner — WebApp v2.0</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Hybrid Scanner — QR + Barcode (v3.0)</title>
 
   <!-- Анти-кеш -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
 
-  <!-- Telegram SDK -->
+  <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <!-- ZXing JS -->
+
+  <!-- ZXing fallback -->
   <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
 
   <style>
@@ -33,7 +34,7 @@
     <video id="video" autoplay playsinline webkit-playsinline muted></video>
     <div id="roi"><div></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Smart Scanner v2.0</div>
+    <div id="tag">Hybrid Scanner v3.0</div>
     <pre id="log"></pre>
     <button id="fallback">Надіслати у бот</button>
   </main>
@@ -43,7 +44,9 @@
     const log = (t,m)=>{const el=$('#log');const line=`[${new Date().toLocaleTimeString()}] ${t}: ${m}`;console.log(line);el.textContent=(el.textContent+"\n"+line).slice(-6000);}
     const status=m=>{$('#status').textContent=m;log('STATUS',m)}
 
-    let TG=null, lastCode='', detector=null, manualMode=false;
+    let TG=null, detector=null, lastCode='', stream=null;
+    const SCAN_INTERVAL=150; // для ZXing
+    const ZX=window.ZXing;
 
     function getTG(){
       try{
@@ -62,33 +65,60 @@
       const back=devices.find(d=>/back|rear|environment/i.test(d.label));
       const constraints={video:back?{deviceId:{exact:back.deviceId}}:{facingMode:'environment'}};
       try{
-        const stream=await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject=stream;await video.play();
+        stream=await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject=stream; await video.play();
         status('Камера запущена, наведи на код…');
       }catch(e){status('Помилка доступу до камери: '+e.message);}
     }
 
     async function setupDetector(){
       if(!('BarcodeDetector' in window)) return false;
-      const formats=await BarcodeDetector.getSupportedFormats();
-      detector=new BarcodeDetector({formats});
-      return true;
+      try{
+        const fmts=await BarcodeDetector.getSupportedFormats();
+        detector=new BarcodeDetector({formats:fmts});
+        log('Native','Supported formats: '+fmts.join(', '));
+        return true;
+      }catch(e){log('Native','init err '+e.message);return false;}
     }
 
-    async function loopScan(){
+    async function loopNative(){
       if(!detector) return;
       try{
-        const video=$('#video');
-        const codes=await detector.detect(video);
+        const codes=await detector.detect($('#video'));
         if(codes?.length){
           const val=(codes[0].rawValue||'').trim();
           if(val && val!==lastCode){
-            lastCode=val; status(`📦 Код: ${val}`);
-            sendToBot(val);
+            lastCode=val; status(`📦 Код: ${val}`); sendToBot(val);
           }
         }
-      }catch(e){/* ignore */}
-      requestAnimationFrame(loopScan);
+      }catch(e){log('Native','err '+e.message);}
+      requestAnimationFrame(loopNative);
+    }
+
+    function loopZXing(){
+      try{
+        const video=$('#video');
+        const w=video.videoWidth,h=video.videoHeight;
+        if(!w||!h){return setTimeout(loopZXing,SCAN_INTERVAL);}
+        const cvs=document.createElement('canvas');
+        cvs.width=w; cvs.height=h;
+        const ctx=cvs.getContext('2d');
+        ctx.drawImage(video,0,0,w,h);
+        const imageData=ctx.getImageData(0,0,w,h);
+        const luminances=new Uint8ClampedArray(w*h);
+        for(let i=0,j=0;i<imageData.data.length;i+=4,j++) luminances[j]=imageData.data[i];
+        const src=new ZX.RGBLuminanceSource(luminances,w,h);
+        const bitmap=new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
+        const reader=new ZX.MultiFormatReader();
+        const hints=new Map(); hints.set(ZX.DecodeHintType.TRY_HARDER,true);
+        reader.setHints?.(hints);
+        const result=reader.decode(bitmap);
+        if(result){
+          const val=String(result.getText()).trim();
+          if(val && val!==lastCode){ lastCode=val; status(`📦 Код: ${val}`); sendToBot(val); }
+        }
+      }catch(e){/* ignore */ }
+      setTimeout(loopZXing,SCAN_INTERVAL);
     }
 
     function showManualButton(code){
@@ -108,9 +138,7 @@
         log('SEND','sent '+payload);
         status('✅ Відправлено у бот. Перевір чат.');
       }catch(e){status('Помилка sendData: '+e.message);log('SEND','err '+e.message);}
-      if(!manual){
-        setTimeout(()=>{showManualButton(code);},800); // показати ручну після авто
-      }
+      if(!manual){setTimeout(()=>showManualButton(code),800);}
     }
 
     (async()=>{
@@ -119,7 +147,8 @@
       try{TG.expand?.();TG.MainButton?.enable?.();}catch(_){}
       await startCamera();
       const ok=await setupDetector();
-      if(ok){status('Скануй код...');loopScan();}else{status('BarcodeDetector не підтримується');}
+      if(ok){status('Сканування (native)…');loopNative();}
+      else{status('Fallback ZXing…');loopZXing();}
     })();
   </script>
 </body>
