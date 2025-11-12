@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Ultra-Fast Scanner — 1D + QR (v1.8 WebApp-fix)</title>
+  <title>Ultra-Fast Scanner — 1D + QR (v1.9 WebApp-iOS-fix)</title>
 
   <!-- Анти-кеш для WebView -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -35,13 +35,13 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Ultra-Fast Scanner v1.8</div>
+    <div id="tag">Ultra-Fast Scanner v1.8.1</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.8';
+    const VERSION = '1.8.1';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -58,7 +58,7 @@
       el.textContent = (el.textContent+"\n"+line).slice(-6000);
     }
 
-    // Анти-кеш: чистимо SW та caches
+    // Анти-кеш
     (async()=>{
       try{
         if('serviceWorker' in navigator){
@@ -75,13 +75,17 @@
       }catch(e){ log('CACHE','skip '+(e.message||e)); }
     })();
 
-    // Надійне визначення Telegram WebApp
+    // Telegram WebApp
     function getTG(){
       try{
         const tg = window.Telegram?.WebApp || window.parent?.Telegram?.WebApp || window.opener?.Telegram?.WebApp;
         if (tg) {
           try { tg.ready?.(); } catch(_) {}
           log('TG','detected YES | platform='+(tg.platform||'unknown')+' ver='+(tg.version||'?'));
+          // діагностика initData
+          const initLen = (tg.initData || '').length;
+          const userId  = tg.initDataUnsafe?.user?.id || 'none';
+          log('TG',`initData.len=${initLen} user=${userId}`);
           return tg;
         }
       }catch(e){ log('TG','error '+(e.message||e)); }
@@ -90,7 +94,7 @@
     }
     let TG = null;
 
-    // Антидубль
+    // антидубль
     let lastSent = { value:'', at:0 };
     function shouldSend(v){
       const n=Date.now();
@@ -100,7 +104,6 @@
 
     function uiConfirm(text){
       try{
-        // легке підтвердження для користувача
         if (TG?.showPopup) TG.showPopup({title:"Сканер", message:text, buttons:[{type:"close"}]});
         else status(text);
       }catch(_){}
@@ -113,10 +116,7 @@
         status(`Знайдено: ${code} → надсилаю…`);
 
         TG = TG || getTG();
-
-        // Додаткова перевірка: чи справді це відкрито як WebApp від бота (є user)
-        const hasUser = !!(TG && TG.initDataUnsafe && TG.initDataUnsafe.user && TG.initDataUnsafe.user.id);
-        if (!TG || !hasUser){
+        if (!TG){
           status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
           return;
         }
@@ -126,15 +126,15 @@
         // iOS-safe: пауза перед sendData + довша пауза перед close()
         setTimeout(()=>{
           const payload = JSON.stringify({ action:'handleScan', code:String(code||'') });
-          log('SEND','sendData '+payload);
+          log('SEND','sendData ' + payload);
           TG.sendData?.(payload);
 
           setTimeout(()=>{
             try { TG.close?.(); } catch(_){ log('TG','close() not available'); }
             uiConfirm('✅ Надіслано в бот');
-          }, 1200); // збільшено для iOS
+          }, 1200);
 
-        }, 200); // коротка пауза, щоб WebApp «прокинувся»
+        }, 200);
 
       }catch(e){
         log('SEND','err '+(e.message||e));
@@ -213,7 +213,7 @@
         const frame=grabRoi(); if(!frame) return null;
         const {imageData, rw, rh}=frame;
         const luminances = new Uint8ClampedArray(rw*rh);
-        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // Red як люмінанс
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i];
         const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
         const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
         const reader = new ZX.MultiFormatReader();
@@ -248,9 +248,7 @@
         try { window.Telegram?.WebApp?.ready?.(); } catch(_) {}
         TG = getTG();
 
-        // Додаткова перевірка — маємо бачити user.id, інакше це не WebApp із кнопки бота
-        const hasUser = !!(TG && TG.initDataUnsafe && TG.initDataUnsafe.user && TG.initDataUnsafe.user.id);
-        if (!hasUser){
+        if (!TG){
           status('Відкрийте через кнопку в Telegram (WebApp). Зараз сторінка запущена поза Telegram.');
           return;
         }
