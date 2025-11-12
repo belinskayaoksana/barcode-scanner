@@ -1,15 +1,19 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Ultra‑Fast Scanner — 1D + QR (v1.6 WebApp‑fix, ROI, debug)</title>
-  <!-- Force fresh load to avoid Telegram WebView cache -->
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>Ultra-Fast Scanner — 1D + QR (v1.7 WebApp-fix)</title>
 
-  <!-- ZXing UMD (core). We use core decode() via canvas/ROI to avoid CORS + browser helper deps -->
+  <!-- Анти-кеш для WebView -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+
+  <!-- Telegram WebApp SDK (щоб WebApp гарантовано визначався) -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- ZXing UMD (core) -->
   <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
 
   <style>
@@ -30,16 +34,14 @@
   <main id="stage">
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
-    <div id="status">Ініціалізація камери…</div>
-    <div id="tag">Ultra‑Fast Scanner v1.6</div>
+    <div id="status">Ініціалізація…</div>
+    <div id="tag">Ultra-Fast Scanner v1.7</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.6';
-    const INVENTORY_API_URL = ""; // бекенд / Apps Script, якщо НЕ відкрито як Telegram WebApp
-    const API_TOKEN = "";
+    const VERSION = '1.7';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -53,15 +55,14 @@
       const el=$('#log');
       const line = `[${new Date().toLocaleTimeString()}] ${tag}: ${msg}`;
       console.log(line);
-      el.textContent = (el.textContent+"\n"+line).slice(-5000);
+      el.textContent = (el.textContent+"\n"+line).slice(-6000);
     }
 
-    // ---- Жорстке очищення SW/caches, щоб версия підтялась ----
+    // Анти-кеш: чистимо SW та caches
     (async()=>{
       try{
         if('serviceWorker' in navigator){
-          const regs = await navigator.serviceWorker.getRegistrations();
-          for(const r of regs){ await r.unregister(); log('CACHE','SW unregistered'); }
+          for(const r of await navigator.serviceWorker.getRegistrations()){ await r.unregister(); log('CACHE','SW unregistered'); }
         }
         if('caches' in window){
           for(const k of await caches.keys()){ await caches.delete(k); log('CACHE',`cache deleted: ${k}`); }
@@ -70,24 +71,22 @@
       }catch(e){ log('CACHE','skip '+(e.message||e)); }
     })();
 
-    // ---- Надійне визначення Telegram WebApp ----
+    // Надійне визначення Telegram WebApp
     function getTG(){
       try{
-        const tg = (window.Telegram?.WebApp) || (window.parent?.Telegram?.WebApp) || (window.opener?.Telegram?.WebApp);
-        if(tg){
-          try{ tg.ready?.(); }catch(_){/*no-op*/}
-          log('TG','WebApp detected: yes');
-          log('TG','initDataLen='+(tg.initData?.length||0)+' platform='+(tg.platform||'unknown'));
+        const tg = window.Telegram?.WebApp || window.parent?.Telegram?.WebApp || window.opener?.Telegram?.WebApp;
+        if (tg) {
+          try { tg.ready?.(); } catch(_) {}
+          log('TG','detected YES | platform='+(tg.platform||'unknown')+' ver='+(tg.version||'?'));
           return tg;
         }
       }catch(e){ log('TG','error '+(e.message||e)); }
-      log('TG','WebApp detected: NO');
+      log('TG','detected NO');
       return null;
     }
-
     let TG = null;
 
-    let lastSent = { value: '', at: 0 };
+    let lastSent = { value:'', at:0 };
     function shouldSend(v){ const n=Date.now(); if(v===lastSent.value && (n-lastSent.at)<4000) return false; lastSent={value:v,at:n}; return true; }
 
     async function sendToBot(code){
@@ -97,23 +96,22 @@
         status(`Знайдено: ${code} → надсилаю…`);
 
         TG = TG || getTG();
-        if(TG){
+        if (TG){
           TG.HapticFeedback?.impactOccurred?.('light');
-          TG.sendData?.(JSON.stringify({action:'handleScan',code}));
-          // Якщо Telegram не закриває сам — дамо підказку в лог
-          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 60);
+          TG.sendData?.(JSON.stringify({action:'handleScan', code}));
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 80);
           return;
         }
 
-        if(INVENTORY_API_URL){
-          const headers={'Content-Type':'application/json'}; if(API_TOKEN) headers['X-API-KEY']=API_TOKEN;
-          const r=await fetch(INVENTORY_API_URL,{method:'POST',headers,body:JSON.stringify({action:'handleScan',source:'web_scanner',code})});
-          if(!r.ok) throw new Error('HTTP '+r.status);
-          status('Надіслано ✅'); setTimeout(()=>window.close(),300);
-        } else status('Немає підключення до бота або API URL');
-      }catch(e){ log('SEND','err '+(e.message||e)); status('Помилка надсилання'); }
+        // Якщо відкрито не в Telegram — показуємо коротку підказку
+        status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
+      }catch(e){
+        log('SEND','err '+(e.message||e));
+        status('Помилка надсилання');
+      }
     }
 
+    // Камера
     const video=$('#video');
     const canvas=$('#canvas');
     const ctx=canvas.getContext('2d',{willReadFrequently:true});
@@ -122,18 +120,16 @@
       try{
         const dev=await navigator.mediaDevices.enumerateDevices();
         const vids=dev.filter(d=>d.kind==='videoinput');
-        log('DEV', JSON.stringify(vids.map(v=>({label:v.label,id:v.deviceId}))))
+        log('DEV', JSON.stringify(vids.map(v=>({label:v.label,id:v.deviceId})))); 
         return vids;
       }catch(e){ log('DEV','err '+(e.message||e)); return []; }
     }
-
     async function chooseBackCamera(base){
       const vids=await enumerateCams();
       const back=vids.find(d=>/back|rear|зад|environment/i.test(d.label));
-      if(back){ log('CAM','use back '+back.label); return { ...base, video: { ...base.video, deviceId: { exact: back.deviceId } } } }
+      if(back){ log('CAM','use back '+back.label); return { ...base, video: { ...base.video, deviceId: { exact: back.deviceId } } }; }
       log('CAM','fallback default camera'); return base;
     }
-
     async function startCamera(){
       if(!navigator.mediaDevices?.getUserMedia){ status('Камера не підтримується'); return null; }
       video.muted=true; video.setAttribute('muted','');
@@ -151,7 +147,7 @@
       }
     }
 
-    // --- Native detector first ---
+    // Нативний детектор → ZXing (core)
     let useNative=false, detector=null;
     async function setupNative(){
       if(!('BarcodeDetector' in window)) return false;
@@ -165,22 +161,19 @@
       }catch(e){ log('Native','unavailable '+(e.message||e)); return false; }
     }
 
-    // --- ZXing core (UMD) via canvas ROI ---
     function getRoiRect(vw, vh){
       const rw=Math.floor(vw*0.86), rh=Math.floor(vh*0.40);
       const rx=Math.floor((vw-rw)/2), ry=Math.floor((vh-rh)/2);
       return {rx,ry,rw,rh};
     }
-
     function grabRoi(){
       const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return null;
       const {rx,ry,rw,rh}=getRoiRect(vw,vh);
-      canvas.width=rw; canvas.height=rh; // малюємо лише ROI для швидкості
+      canvas.width=rw; canvas.height=rh;
       ctx.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
       const imageData=ctx.getImageData(0,0,rw,rh);
       return {imageData, rw, rh};
     }
-
     function tryDecodeZX(){
       try{
         const ZX = window.ZXing;
@@ -188,7 +181,7 @@
         const frame=grabRoi(); if(!frame) return null;
         const {imageData, rw, rh}=frame;
         const luminances = new Uint8ClampedArray(rw*rh);
-        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i];
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // Red як люмінанс — швидко й працює
         const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
         const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
         const reader = new ZX.MultiFormatReader();
@@ -207,7 +200,6 @@
       }catch(e){ log('NATIVE','err '+(e.message||e)); }
       requestAnimationFrame(loopScanNative);
     }
-
     function loopScanZXcore(){
       const code = tryDecodeZX();
       if(code){ log('ZX','hit '+code); return sendToBot(code); }
@@ -216,8 +208,14 @@
 
     (async()=>{
       try{
+        // 1) Telegram інтеграція
+        try { window.Telegram?.WebApp?.ready?.(); } catch(_) {}
+        TG = getTG();
+
+        // 2) Камера
         await startCamera();
-        TG = getTG(); // одразу перевіримо присутність WebApp
+
+        // 3) Детектори
         const okNative = await setupNative();
         if(okNative){ status('Скануйте… (native)'); requestAnimationFrame(loopScanNative); }
         else { status('Скануйте… (ZX core)'); loopScanZXcore(); }
