@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Ultra-Fast Scanner — 1D + QR (v1.7 WebApp-fix)</title>
+  <title>Ultra-Fast Scanner — 1D + QR (v1.8 WebApp-fix)</title>
 
   <!-- Анти-кеш для WebView -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
 
-  <!-- Telegram WebApp SDK (щоб WebApp гарантовано визначався) -->
+  <!-- Telegram WebApp SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
   <!-- ZXing UMD (core) -->
@@ -35,13 +35,13 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Ultra-Fast Scanner v1.7</div>
+    <div id="tag">Ultra-Fast Scanner v1.7.1</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.7';
+    const VERSION = '1.7.1';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -62,10 +62,14 @@
     (async()=>{
       try{
         if('serviceWorker' in navigator){
-          for(const r of await navigator.serviceWorker.getRegistrations()){ await r.unregister(); log('CACHE','SW unregistered'); }
+          for(const r of await navigator.serviceWorker.getRegistrations()){
+            await r.unregister(); log('CACHE','SW unregistered');
+          }
         }
         if('caches' in window){
-          for(const k of await caches.keys()){ await caches.delete(k); log('CACHE',`cache deleted: ${k}`); }
+          for(const k of await caches.keys()){
+            await caches.delete(k); log('CACHE',`cache deleted: ${k}`);
+          }
         }
         localStorage.setItem('scanner_version', VERSION);
       }catch(e){ log('CACHE','skip '+(e.message||e)); }
@@ -86,8 +90,13 @@
     }
     let TG = null;
 
+    // Антидубль
     let lastSent = { value:'', at:0 };
-    function shouldSend(v){ const n=Date.now(); if(v===lastSent.value && (n-lastSent.at)<4000) return false; lastSent={value:v,at:n}; return true; }
+    function shouldSend(v){
+      const n=Date.now();
+      if(v===lastSent.value && (n-lastSent.at)<6000) return false; // було 4000
+      lastSent={value:v,at:n}; return true;
+    }
 
     async function sendToBot(code){
       try{
@@ -99,11 +108,12 @@
         if (TG){
           TG.HapticFeedback?.impactOccurred?.('light');
           TG.sendData?.(JSON.stringify({action:'handleScan', code}));
-          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 80);
+          // довша затримка, щоб точно встигло відправитись
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 500);
           return;
         }
 
-        // Якщо відкрито не в Telegram — показуємо коротку підказку
+        // Якщо відкрито не в Telegram — підказка
         status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
       }catch(e){
         log('SEND','err '+(e.message||e));
@@ -142,13 +152,14 @@
       }catch(e){
         log('GUM','primary fail '+(e.name||e));
         try{
-          const s=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); video.srcObject=s; await video.play(); status('Камера (fallback) — скануйте'); return s;
+          const s=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+          video.srcObject=s; await video.play(); status('Камера (fallback) — скануйте'); return s;
         }catch(e2){ status('Камеру не вдалося запустити: '+(e2.name||e2)); throw e2; }
       }
     }
 
     // Нативний детектор → ZXing (core)
-    let useNative=false, detector=null;
+    let detector=null;
     async function setupNative(){
       if(!('BarcodeDetector' in window)) return false;
       try{
@@ -157,7 +168,7 @@
         log('Native formats', JSON.stringify(formats));
         if(!formats.length) return false;
         detector = new window.BarcodeDetector({formats});
-        useNative = true; return true;
+        return true;
       }catch(e){ log('Native','unavailable '+(e.message||e)); return false; }
     }
 
@@ -181,7 +192,7 @@
         const frame=grabRoi(); if(!frame) return null;
         const {imageData, rw, rh}=frame;
         const luminances = new Uint8ClampedArray(rw*rh);
-        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // Red як люмінанс — швидко й працює
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // Red як люмінанс
         const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
         const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
         const reader = new ZX.MultiFormatReader();
@@ -196,7 +207,11 @@
     async function loopScanNative(){
       try{
         const codes=await detector.detect(video);
-        if(codes?.length){ const val=(codes[0].rawValue||'').trim(); log('NATIVE','hit '+val); if(val) return sendToBot(val); }
+        if(codes?.length){
+          const val=(codes[0].rawValue||'').trim();
+          log('NATIVE','hit '+val);
+          if(val) return sendToBot(val);
+        }
       }catch(e){ log('NATIVE','err '+(e.message||e)); }
       requestAnimationFrame(loopScanNative);
     }
@@ -211,6 +226,11 @@
         // 1) Telegram інтеграція
         try { window.Telegram?.WebApp?.ready?.(); } catch(_) {}
         TG = getTG();
+        if (!TG){
+          status('Відкрийте через кнопку в Telegram (WebApp). Зараз сторінка запущена поза Telegram.');
+          // Не запускаємо сканування, щоб не створювати хибне враження
+          return;
+        }
 
         // 2) Камера
         await startCamera();
