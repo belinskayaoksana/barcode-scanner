@@ -35,13 +35,13 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Ultra-Fast Scanner v1.7.1</div>
+    <div id="tag">Ultra-Fast Scanner v1.8</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.7.1';
+    const VERSION = '1.8';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -94,8 +94,16 @@
     let lastSent = { value:'', at:0 };
     function shouldSend(v){
       const n=Date.now();
-      if(v===lastSent.value && (n-lastSent.at)<6000) return false; // було 4000
+      if(v===lastSent.value && (n-lastSent.at)<6000) return false;
       lastSent={value:v,at:n}; return true;
+    }
+
+    function uiConfirm(text){
+      try{
+        // легке підтвердження для користувача
+        if (TG?.showPopup) TG.showPopup({title:"Сканер", message:text, buttons:[{type:"close"}]});
+        else status(text);
+      }catch(_){}
     }
 
     async function sendToBot(code){
@@ -105,16 +113,29 @@
         status(`Знайдено: ${code} → надсилаю…`);
 
         TG = TG || getTG();
-        if (TG){
-          TG.HapticFeedback?.impactOccurred?.('light');
-          TG.sendData?.(JSON.stringify({action:'handleScan', code}));
-          // довша затримка, щоб точно встигло відправитись
-          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 1000);
+
+        // Додаткова перевірка: чи справді це відкрито як WebApp від бота (є user)
+        const hasUser = !!(TG && TG.initDataUnsafe && TG.initDataUnsafe.user && TG.initDataUnsafe.user.id);
+        if (!TG || !hasUser){
+          status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
           return;
         }
 
-        // Якщо відкрито не в Telegram — підказка
-        status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
+        TG.HapticFeedback?.impactOccurred?.('light');
+
+        // iOS-safe: пауза перед sendData + довша пауза перед close()
+        setTimeout(()=>{
+          const payload = JSON.stringify({ action:'handleScan', code:String(code||'') });
+          log('SEND','sendData '+payload);
+          TG.sendData?.(payload);
+
+          setTimeout(()=>{
+            try { TG.close?.(); } catch(_){ log('TG','close() not available'); }
+            uiConfirm('✅ Надіслано в бот');
+          }, 1200); // збільшено для iOS
+
+        }, 200); // коротка пауза, щоб WebApp «прокинувся»
+
       }catch(e){
         log('SEND','err '+(e.message||e));
         status('Помилка надсилання');
@@ -226,9 +247,11 @@
         // 1) Telegram інтеграція
         try { window.Telegram?.WebApp?.ready?.(); } catch(_) {}
         TG = getTG();
-        if (!TG){
+
+        // Додаткова перевірка — маємо бачити user.id, інакше це не WebApp із кнопки бота
+        const hasUser = !!(TG && TG.initDataUnsafe && TG.initDataUnsafe.user && TG.initDataUnsafe.user.id);
+        if (!hasUser){
           status('Відкрийте через кнопку в Telegram (WebApp). Зараз сторінка запущена поза Telegram.');
-          // Не запускаємо сканування, щоб не створювати хибне враження
           return;
         }
 
