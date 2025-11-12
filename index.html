@@ -109,7 +109,7 @@
           TG.HapticFeedback?.impactOccurred?.('light');
           TG.sendData?.(JSON.stringify({action:'handleScan', code}));
           // довша затримка, щоб точно встигло відправитись
-          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 500);
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 1000);
           return;
         }
 
