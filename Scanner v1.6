@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Ultra‑Fast Scanner — 1D + QR (v1.6 WebApp‑fix, ROI, debug)</title>
+  <!-- Force fresh load to avoid Telegram WebView cache -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <!-- ZXing UMD (core). We use core decode() via canvas/ROI to avoid CORS + browser helper deps -->
+  <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+
+  <style>
+    :root { color-scheme: dark }
+    html,body{height:100%}
+    body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #stage{position:fixed;inset:0;overflow:hidden;background:#000}
+    #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+    #mask{position:absolute;inset:0;pointer-events:none;display:grid;place-items:center}
+    #roi{width:min(86vw,680px);height:min(40vh,340px);outline:2px solid rgba(255,255,255,.9);border-radius:18px;box-shadow:0 0 0 200vmax rgba(0,0,0,.55) inset}
+    #tag{position:absolute;left:12px;bottom:12px;font-size:12px;opacity:.85;background:#111;border:1px solid #2c2c2c;border-radius:999px;padding:4px 10px}
+    #status{position:absolute;top:12px;left:12px;right:12px;font-size:13px;background:#111;border:1px solid #2c2c2c;border-radius:10px;padding:6px 10px;max-width:100%}
+    #canvas{display:none}
+    #log{position:absolute;right:12px;bottom:48px;width:min(92vw,560px);max-height:42vh;overflow:auto;background:#0b0b0b;opacity:.92;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace}
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <video id="video" playsinline webkit-playsinline autoplay muted></video>
+    <div id="mask"><div id="roi"></div></div>
+    <div id="status">Ініціалізація камери…</div>
+    <div id="tag">Ultra‑Fast Scanner v1.6</div>
+    <pre id="log"></pre>
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <script>
+    const VERSION = '1.6';
+    const INVENTORY_API_URL = ""; // бекенд / Apps Script, якщо НЕ відкрито як Telegram WebApp
+    const API_TOKEN = "";
+    const SCAN_INTERVAL_MS = 110;
+    const VIBRATE_MS = 20;
+
+    const BARCODE_FORMATS_NATIVE = [
+      'qr_code','code_39','code_93','code_128','ean_13','ean_8','upc_a','upc_e','itf','codabar','data_matrix','pdf417'
+    ];
+
+    const $ = s => document.querySelector(s);
+    const status = m => { $('#status').textContent = m; log('STATUS', m); };
+    function log(tag, msg){
+      const el=$('#log');
+      const line = `[${new Date().toLocaleTimeString()}] ${tag}: ${msg}`;
+      console.log(line);
+      el.textContent = (el.textContent+"\n"+line).slice(-5000);
+    }
+
+    // ---- Жорстке очищення SW/caches, щоб версия підтялась ----
+    (async()=>{
+      try{
+        if('serviceWorker' in navigator){
+          const regs = await navigator.serviceWorker.getRegistrations();
+          for(const r of regs){ await r.unregister(); log('CACHE','SW unregistered'); }
+        }
+        if('caches' in window){
+          for(const k of await caches.keys()){ await caches.delete(k); log('CACHE',`cache deleted: ${k}`); }
+        }
+        localStorage.setItem('scanner_version', VERSION);
+      }catch(e){ log('CACHE','skip '+(e.message||e)); }
+    })();
+
+    // ---- Надійне визначення Telegram WebApp ----
+    function getTG(){
+      try{
+        const tg = (window.Telegram?.WebApp) || (window.parent?.Telegram?.WebApp) || (window.opener?.Telegram?.WebApp);
+        if(tg){
+          try{ tg.ready?.(); }catch(_){/*no-op*/}
+          log('TG','WebApp detected: yes');
+          log('TG','initDataLen='+(tg.initData?.length||0)+' platform='+(tg.platform||'unknown'));
+          return tg;
+        }
+      }catch(e){ log('TG','error '+(e.message||e)); }
+      log('TG','WebApp detected: NO');
+      return null;
+    }
+
+    let TG = null;
+
+    let lastSent = { value: '', at: 0 };
+    function shouldSend(v){ const n=Date.now(); if(v===lastSent.value && (n-lastSent.at)<4000) return false; lastSent={value:v,at:n}; return true; }
+
+    async function sendToBot(code){
+      try{
+        if(!shouldSend(code)) return;
+        navigator.vibrate?.(VIBRATE_MS);
+        status(`Знайдено: ${code} → надсилаю…`);
+
+        TG = TG || getTG();
+        if(TG){
+          TG.HapticFeedback?.impactOccurred?.('light');
+          TG.sendData?.(JSON.stringify({action:'handleScan',code}));
+          // Якщо Telegram не закриває сам — дамо підказку в лог
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 60);
+          return;
+        }
+
+        if(INVENTORY_API_URL){
+          const headers={'Content-Type':'application/json'}; if(API_TOKEN) headers['X-API-KEY']=API_TOKEN;
+          const r=await fetch(INVENTORY_API_URL,{method:'POST',headers,body:JSON.stringify({action:'handleScan',source:'web_scanner',code})});
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          status('Надіслано ✅'); setTimeout(()=>window.close(),300);
+        } else status('Немає підключення до бота або API URL');
+      }catch(e){ log('SEND','err '+(e.message||e)); status('Помилка надсилання'); }
+    }
+
+    const video=$('#video');
+    const canvas=$('#canvas');
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+
+    async function enumerateCams(){
+      try{
+        const dev=await navigator.mediaDevices.enumerateDevices();
+        const vids=dev.filter(d=>d.kind==='videoinput');
+        log('DEV', JSON.stringify(vids.map(v=>({label:v.label,id:v.deviceId}))))
+        return vids;
+      }catch(e){ log('DEV','err '+(e.message||e)); return []; }
+    }
+
+    async function chooseBackCamera(base){
+      const vids=await enumerateCams();
+      const back=vids.find(d=>/back|rear|зад|environment/i.test(d.label));
+      if(back){ log('CAM','use back '+back.label); return { ...base, video: { ...base.video, deviceId: { exact: back.deviceId } } } }
+      log('CAM','fallback default camera'); return base;
+    }
+
+    async function startCamera(){
+      if(!navigator.mediaDevices?.getUserMedia){ status('Камера не підтримується'); return null; }
+      video.muted=true; video.setAttribute('muted','');
+      let constraints={ audio:false, video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30,max:60}, advanced:[{focusMode:'continuous'}] } };
+      try{
+        constraints=await chooseBackCamera(constraints);
+        log('GUM','constraints '+JSON.stringify(constraints.video||{}));
+        const stream=await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject=stream; await video.play(); status('Камера запущена — наведіть на код'); return stream;
+      }catch(e){
+        log('GUM','primary fail '+(e.name||e));
+        try{
+          const s=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); video.srcObject=s; await video.play(); status('Камера (fallback) — скануйте'); return s;
+        }catch(e2){ status('Камеру не вдалося запустити: '+(e2.name||e2)); throw e2; }
+      }
+    }
+
+    // --- Native detector first ---
+    let useNative=false, detector=null;
+    async function setupNative(){
+      if(!('BarcodeDetector' in window)) return false;
+      try{
+        const sup = (await window.BarcodeDetector.getSupportedFormats?.())||[];
+        const formats = BARCODE_FORMATS_NATIVE.filter(f=>sup.includes(f));
+        log('Native formats', JSON.stringify(formats));
+        if(!formats.length) return false;
+        detector = new window.BarcodeDetector({formats});
+        useNative = true; return true;
+      }catch(e){ log('Native','unavailable '+(e.message||e)); return false; }
+    }
+
+    // --- ZXing core (UMD) via canvas ROI ---
+    function getRoiRect(vw, vh){
+      const rw=Math.floor(vw*0.86), rh=Math.floor(vh*0.40);
+      const rx=Math.floor((vw-rw)/2), ry=Math.floor((vh-rh)/2);
+      return {rx,ry,rw,rh};
+    }
+
+    function grabRoi(){
+      const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return null;
+      const {rx,ry,rw,rh}=getRoiRect(vw,vh);
+      canvas.width=rw; canvas.height=rh; // малюємо лише ROI для швидкості
+      ctx.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
+      const imageData=ctx.getImageData(0,0,rw,rh);
+      return {imageData, rw, rh};
+    }
+
+    function tryDecodeZX(){
+      try{
+        const ZX = window.ZXing;
+        if(!ZX){ log('ZX','not loaded'); return null; }
+        const frame=grabRoi(); if(!frame) return null;
+        const {imageData, rw, rh}=frame;
+        const luminances = new Uint8ClampedArray(rw*rh);
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i];
+        const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
+        const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
+        const reader = new ZX.MultiFormatReader();
+        const hints = new Map(); hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+        reader.setHints?.(hints);
+        const result = reader.decode(bitmap);
+        if(result && result.getText){ return String(result.getText()).trim(); }
+        return null;
+      }catch(e){ return null; }
+    }
+
+    async function loopScanNative(){
+      try{
+        const codes=await detector.detect(video);
+        if(codes?.length){ const val=(codes[0].rawValue||'').trim(); log('NATIVE','hit '+val); if(val) return sendToBot(val); }
+      }catch(e){ log('NATIVE','err '+(e.message||e)); }
+      requestAnimationFrame(loopScanNative);
+    }
+
+    function loopScanZXcore(){
+      const code = tryDecodeZX();
+      if(code){ log('ZX','hit '+code); return sendToBot(code); }
+      setTimeout(loopScanZXcore, SCAN_INTERVAL_MS);
+    }
+
+    (async()=>{
+      try{
+        await startCamera();
+        TG = getTG(); // одразу перевіримо присутність WebApp
+        const okNative = await setupNative();
+        if(okNative){ status('Скануйте… (native)'); requestAnimationFrame(loopScanNative); }
+        else { status('Скануйте… (ZX core)'); loopScanZXcore(); }
+      }catch(e){ status('Помилка запуску: '+(e?.name||e?.message||e)); }
+    })();
+  </script>
+</body>
+</html>
