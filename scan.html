@@ -1,156 +1,231 @@
 <!DOCTYPE html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Сканер штрих-/QR-коду — v2.6 (stable send)</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Ultra‑Fast Scanner — back camera, Code‑39 + QR (v1.0)</title>
   <style>
     :root { color-scheme: dark }
-    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#000; color:#fff }
-    header { padding:12px 16px; font-weight:600; background:#111; display:flex; justify-content:space-between; align-items:center }
-    .tag { padding:2px 8px; border:1px solid #2d2d2d; border-radius:999px; font-size:12px; background:#1b1b1b; color:#cfcfcf }
-    #stage { position:relative; height:56vh; background:#000; overflow:hidden }
-    #video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000 }
-    #hint { position:absolute; left:50%; bottom:10px; transform:translateX(-50%); font:600 12px/1 system-ui; color:#eee;
-            text-shadow:0 1px 2px #000; opacity:.95; pointer-events:none }
-    #lastCode { position:absolute; left:0; right:0; top:8px; text-align:center; font:800 22px/1.25 system-ui;
-                color:#00ff91; text-shadow:0 0 8px #000; pointer-events:none; word-break:break-word; padding:0 10px }
-    #toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:24px; background:#1f2328; color:#e6edf3;
-            border:1px solid #30363d; padding:10px 14px; border-radius:12px; font-size:14px; opacity:0; pointer-events:none; transition:opacity .2s }
-    #toast.show{ opacity:1 }
-    #tapOverlay{ position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.35) }
-    #tapOverlay button{ font-size:16px; padding:12px 16px; border-radius:12px; border:1px solid #2b2b2b; background:#1a1a1a; color:#fff }
+    html,body{height:100%}
+    body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #stage{position:fixed;inset:0;overflow:hidden;background:#000}
+    #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)} /* mirror to help aiming */
+    #mask{position:absolute;inset:0;pointer-events:none;display:grid;place-items:center}
+    #roi{width:min(84vw,640px);height:min(38vh,320px);outline:2px solid rgba(255,255,255,.75);border-radius:18px;box-shadow:0 0 0 200vmax rgba(0,0,0,.55) inset}
+    #tag{position:absolute;left:12px;bottom:12px;font-size:12px;opacity:.7;background:#111;border:1px solid #2c2c2c;border-radius:999px;padding:4px 10px}
+    #status{position:absolute;top:12px;left:12px;font-size:13px;background:#111;border:1px solid #2c2c2c;border-radius:10px;padding:6px 10px;max-width:70ch}
+    #canvas{display:none}
   </style>
 </head>
 <body>
-  <header>
-    <div>Сканер штрих-/QR-коду</div>
-    <span class="tag">v2.6</span>
-  </header>
+  <main id="stage">
+    <video id="video" playsinline autoplay></video>
+    <div id="mask"><div id="roi"></div></div>
+    <div id="status">Ініціалізація камери…</div>
+    <div id="tag">Ultra‑Fast Scanner v1.0</div>
+    <canvas id="canvas"></canvas>
+  </main>
 
-  <div id="stage">
-    <video id="video" playsinline muted autoplay></video>
-    <div id="lastCode"></div>
-    <div id="hint">Наведи камеру на штрих-код або QR — відправиться автоматично</div>
-    <div id="tapOverlay"><button id="btnTapStart">▶️ Увімкнути камеру</button></div>
-  </div>
-  <div id="toast"></div>
+  <script type="module">
+    // ====== CONFIG ======
+    const INVENTORY_API_URL = ""; // опційно: Apps Script / ваш сервер. Якщо пусто — надсилатимемо через Telegram WebApp sendData
+    const API_TOKEN = "";         // опційно: якщо на бекенді вимагається X-API-KEY
+    const SCAN_INTERVAL_MS = 120;  // частота обробки кадру у fallback
+    const VIBRATE_MS = 20;         // коротка вібрація при знаходженні коду
 
-  <!-- libs -->
-  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    // Список форматів для BarcodeDetector (де підтримується)
+    const BARCODE_FORMATS = [
+      'qr_code',
+      'code_39', 'code_93', 'code_128',
+      'ean_13', 'ean_8', 'upc_a', 'upc_e',
+      'itf', 'codabar', 'data_matrix', 'pdf417'
+    ];
 
-  <script>
-  // ===== CONFIG =====
-  const STABLE_REPEAT = 2;
-  const SEND_DELAY_MS = 120;
-  const ZXING_SCAN_INTERVAL_MS = 120;
-  const RETRIES = 2, RETRY_GAP_MS = 250;
-  const DEBUG = false;
+    // ====== UTIL ======
+    const $ = sel => document.querySelector(sel);
+    const status = msg => { $('#status').textContent = msg };
 
-  // ===== INIT TELEGRAM =====
-  const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
-  if (tg) {
-    tg.expand();
-    tg.ready && tg.ready();
-    tg.enableClosingConfirmation && tg.enableClosingConfirmation();
-  }
-
-  const video = document.getElementById('video');
-  const lastCodeEl = document.getElementById('lastCode');
-  const toastEl = document.getElementById('toast');
-  const tapOverlay = document.getElementById('tapOverlay');
-  const btnTapStart = document.getElementById('btnTapStart');
-  function toast(t, ms=1200){ toastEl.textContent=t; toastEl.classList.add('show'); setTimeout(()=>toastEl.classList.remove('show'), ms); }
-
-  let currentTrack=null, gotCode=false, lastPayload=null, lastHit={code:'',t:0,times:0,fmt:''};
-
-  function acceptCandidate(code, fmt){
-    code = String(code||'').trim();
-    if(!code) return;
-    const now = performance.now();
-    if(code===lastHit.code && (now-lastHit.t)<1200){ lastHit.times+=1; }
-    else { lastHit={code, t:now, times:1, fmt}; }
-    if(lastHit.times>=STABLE_REPEAT){
-      gotCode=true; lastPayload={code, fmt};
-      lastCodeEl.textContent=`✓ ${code}`;
-      try{ navigator.vibrate && navigator.vibrate(25) }catch{}
-      sendAndClose();
+    // debounce повторних відправок того ж коду
+    let lastSent = { value: '', at: 0 };
+    function shouldSend(value) {
+      const now = Date.now();
+      if (value === lastSent.value && (now - lastSent.at) < 4000) return false; // 4с антидубль
+      lastSent = { value, at: now };
+      return true;
     }
-  }
 
-  async function startCamera(){
-    try{
-      const devs=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");
-      const pref = devs.find(d=>/back|rear|environment/i.test(d.label)) || devs[0];
-      const stream = await navigator.mediaDevices.getUserMedia({ video:{ deviceId: pref?.deviceId ? { exact: pref.deviceId } : undefined, facingMode:"environment" }});
+    async function sendToBot(code) {
+      try {
+        if (!shouldSend(code)) return;
+        if (navigator.vibrate) navigator.vibrate(VIBRATE_MS);
+        status(`Знайдено: ${code} → надсилаю…`);
+
+        // 1) Якщо вбудовано у Telegram WebApp — шлемо прямо в бот
+        if (window?.Telegram?.WebApp) {
+          window.Telegram.WebApp.HapticFeedback?.impactOccurred?.('light');
+          window.Telegram.WebApp.sendData(JSON.stringify({ action: 'handleScan', code }));
+          window.Telegram.WebApp.close(); // миттєво закрити після відправки
+          return;
+        }
+
+        // 2) Інакше — POST на ваш бекенд/Apps Script (якщо вказаний URL)
+        if (INVENTORY_API_URL) {
+          const body = { action: 'handleScan', source: 'web_scanner', code };
+          const headers = { 'Content-Type': 'application/json' };
+          if (API_TOKEN) headers['X-API-KEY'] = API_TOKEN;
+          const r = await fetch(INVENTORY_API_URL, { method: 'POST', headers, body: JSON.stringify(body) });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          status('Надіслано ✅');
+          // Закриваємо вкладку/вікно через мить (для WebApp close вже вище)
+          setTimeout(() => window.close(), 300);
+        } else {
+          status('Немає підключення до бота: вкажіть INVENTORY_API_URL або відкрийте через Telegram WebApp');
+        }
+      } catch (err) {
+        console.error(err);
+        status('Помилка надсилання: ' + err.message);
+      }
+    }
+
+    // ====== CAMERA ======
+    const video = $('#video');
+    const canvas = $('#canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    async function chooseBackCamera(constraintsBase) {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter(d => d.kind === 'videoinput');
+        // шукаємо "back" у мітках
+        const back = videos.find(d => /back|rear|зад/i.test(d.label));
+        if (back) {
+          return { ...constraintsBase, video: { ...constraintsBase.video, deviceId: { exact: back.deviceId } } };
+        }
+      } catch {}
+      return constraintsBase;
+    }
+
+    async function startCamera() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        status('Камера не підтримується');
+        return null;
+      }
+
+      // Базові побажання: задня камера, автофокус, висока частота кадрів
+      let constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30, max: 60 },
+          advanced: [ { focusMode: 'continuous' } ]
+        }
+      };
+
+      constraints = await chooseBackCamera(constraints);
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
-      currentTrack = stream.getVideoTracks()[0];
-      const reader = new ZXing.BrowserMultiFormatReader();
-      reader.decodeFromVideoDevice(pref?.deviceId, video, (res, err)=>{
-        if(gotCode) return;
-        if(res){
-          const code = res.getText();
-          const fmt = (res.barcodeFormat || '').toString();
-          if(code) acceptCandidate(code, fmt);
-        }
-      });
-      toast("Камеру увімкнено");
-    }catch(e){
-      toast("⚠️ Дозволь камеру / HTTPS");
-      tapOverlay.style.display='flex';
+      await video.play();
+      status('Камера запущена — наведіть на код');
+      return stream;
     }
-  }
 
-  async function stopAll(){
-    try{ video.pause(); }catch{}
-    const s=video.srcObject; if(s?.getTracks) s.getTracks().forEach(t=>t.stop());
-    video.srcObject=null; currentTrack=null;
-  }
+    // ====== BARCODE DECODERS ======
+    let useNative = false;
+    let detector = null;
+    let zxingReader = null;
 
-  function isQRFormat(fmt){ return (fmt||'').toString().toUpperCase().includes('QR'); }
+    async function setupDecoders() {
+      // 1) Намагаємось використати нативний BarcodeDetector — найшвидший шлях
+      if ('BarcodeDetector' in window) {
+        try {
+          const supported = await window.BarcodeDetector.getSupportedFormats?.() || [];
+          const formats = BARCODE_FORMATS.filter(f => supported.includes(f));
+          detector = new window.BarcodeDetector({ formats });
+          useNative = true;
+          console.log('BarcodeDetector OK with formats:', formats);
+          return;
+        } catch {}
+      }
+      // 2) Fallback: @zxing/browser (ESM)
+      const mod = await import('https://unpkg.com/@zxing/browser@0.1.5/esm/index.min.js');
+      zxingReader = new mod.BrowserMultiFormatReader();
+      console.log('ZXing fallback enabled');
+    }
 
-  // ===== SEND DATA =====
-  async function sendAndClose(){
-    const payloadObj = {
-      t: isQRFormat(lastPayload.fmt) ? 'qrcode' : 'barcode',
-      fmt: lastPayload.fmt,
-      code: lastPayload.code
-    };
-    const payload = JSON.stringify(payloadObj);
-    let sent=false;
+    // Читання ROI з відео у canvas (для detector або ZXing)
+    function drawFrameToCanvas() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return null;
+      canvas.width = vw; canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
+      return { w: vw, h: vh };
+    }
 
-    try {
-      if (tg && typeof tg.sendData === "function") {
-        await new Promise(r=>setTimeout(r,SEND_DELAY_MS));
-        for (let i=0; i<=RETRIES; i++){
-          try {
-            tg.sendData(payload);
-            sent=true;
-            break;
-          } catch {
-            await new Promise(r=>setTimeout(r,RETRY_GAP_MS));
+    // Розрахунок ROI (центральне вікно для більш стабільного зчитування 1D кодів)
+    function getRoiRect(vw, vh) {
+      const rw = Math.floor(vw * 0.86);
+      const rh = Math.floor(vh * 0.38);
+      const rx = Math.floor((vw - rw) / 2);
+      const ry = Math.floor((vh - rh) / 2);
+      return { rx, ry, rw, rh };
+    }
+
+    async function loopScanNative() {
+      try {
+        const barcodes = await detector.detect(video);
+        if (barcodes && barcodes.length) {
+          const raw = (barcodes[0].rawValue || '').trim();
+          if (raw) return sendToBot(raw);
+        }
+      } catch (e) {
+        // ігноруємо одиночні помилки детектора
+      }
+      requestAnimationFrame(loopScanNative);
+    }
+
+    async function loopScanZXing() {
+      const dim = drawFrameToCanvas();
+      if (dim) {
+        try {
+          const { rx, ry, rw, rh } = getRoiRect(dim.w, dim.h);
+          const imageData = ctx.getImageData(rx, ry, rw, rh);
+          const luminances = new Uint8ClampedArray(imageData.data.length / 4);
+          for (let i = 0, j = 0; i < imageData.data.length; i += 4, j++) luminances[j] = imageData.data[i];
+          const ZXing = await import('https://unpkg.com/@zxing/library@0.20.0/esm/index.js');
+          const luminanceSource = new ZXing.RGBLuminanceSource(luminances, rw, rh);
+          const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
+          const result = ZXing.MultiFormatReader.decode(binaryBitmap);
+          if (result?.getText) {
+            const code = String(result.getText()).trim();
+            if (code) return sendToBot(code);
           }
+        } catch (e) {
+          // тиша: ZXing часто кидає помилки коли немає коду в кадрі
         }
-        setTimeout(()=>{ try{ tg.close && tg.close(); }catch{} }, 250);
       }
-      if(!sent){
-        await navigator.clipboard?.writeText?.(lastPayload.code);
-        alert(`Код: ${lastPayload.code}\n(скопійовано у буфер обміну)`);
-        sent=true;
-      }
-      await stopAll();
-      toast(sent?'✅ Відправлено':'⚠️ Помилка відправлення', sent?900:1400);
-    } catch(err){
-      console.error('Send error', err);
-      toast('⚠️ Не вдалося відправити', 1500);
+      setTimeout(loopScanZXing, SCAN_INTERVAL_MS);
     }
-  }
 
-  // ===== EVENTS =====
-  btnTapStart.onclick = async ()=>{ tapOverlay.style.display='none'; if(!video.srcObject){ await startCamera(); } try{ await video.play(); }catch{} };
-  (async()=>{ video.setAttribute('playsinline',''); video.muted=true; await startCamera(); })();
-  window.addEventListener('beforeunload', stopAll);
+    // ====== BOOTSTRAP ======
+    (async () => {
+      try {
+        await setupDecoders();
+        await startCamera();
+        if (useNative) {
+          status('Скануйте… (native detector)');
+          requestAnimationFrame(loopScanNative);
+        } else {
+          status('Скануйте… (ZXing fallback)');
+          loopScanZXing();
+        }
+      } catch (err) {
+        console.error(err);
+        status('Помилка запуску: ' + err.message);
+      }
+    })();
   </script>
 </body>
 </html>
