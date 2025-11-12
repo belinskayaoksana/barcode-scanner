@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Ultra-Fast Scanner — 1D + QR (v1.9 WebApp-iOS-fix)</title>
+  <title>Ultra-Fast Scanner — 1D + QR (v1.9 iOS-safe + Manual send)</title>
 
   <!-- Анти-кеш для WebView -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -27,7 +27,13 @@
     #tag{position:absolute;left:12px;bottom:12px;font-size:12px;opacity:.85;background:#111;border:1px solid #2c2c2c;border-radius:999px;padding:4px 10px}
     #status{position:absolute;top:12px;left:12px;right:12px;font-size:13px;background:#111;border:1px solid #2c2c2c;border-radius:10px;padding:6px 10px;max-width:100%}
     #canvas{display:none}
-    #log{position:absolute;right:12px;bottom:48px;width:min(92vw,560px);max-height:42vh;overflow:auto;background:#0b0b0b;opacity:.92;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace}
+    #log{position:absolute;right:12px;bottom:64px;width:min(92vw,560px);max-height:42vh;overflow:auto;background:#0b0b0b;opacity:.92;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace}
+    /* Резервна кнопка на сторінці (якщо TG MainButton недоступна) */
+    #fallbackBtn{
+      position:fixed;left:12px;right:12px;bottom:12px;height:44px;border-radius:12px;
+      background:#00a884;color:#fff;border:none;font-weight:600;font-size:16px;
+      display:none;
+    }
   </style>
 </head>
 <body>
@@ -35,13 +41,14 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Ultra-Fast Scanner v1.8.1</div>
+    <div id="tag">Ultra-Fast Scanner v1.9</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
+    <button id="fallbackBtn">Надіслати</button>
   </main>
 
   <script>
-    const VERSION = '1.8.1';
+    const VERSION = '1.9';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -62,39 +69,31 @@
     (async()=>{
       try{
         if('serviceWorker' in navigator){
-          for(const r of await navigator.serviceWorker.getRegistrations()){
-            await r.unregister(); log('CACHE','SW unregistered');
-          }
+          for(const r of await navigator.serviceWorker.getRegistrations()){ await r.unregister(); log('CACHE','SW unregistered'); }
         }
         if('caches' in window){
-          for(const k of await caches.keys()){
-            await caches.delete(k); log('CACHE',`cache deleted: ${k}`);
-          }
+          for(const k of await caches.keys()){ await caches.delete(k); log('CACHE',`cache deleted: ${k}`); }
         }
         localStorage.setItem('scanner_version', VERSION);
       }catch(e){ log('CACHE','skip '+(e.message||e)); }
     })();
 
-    // Telegram WebApp
+    // TG WebApp
     function getTG(){
       try{
         const tg = window.Telegram?.WebApp || window.parent?.Telegram?.WebApp || window.opener?.Telegram?.WebApp;
         if (tg) {
           try { tg.ready?.(); } catch(_) {}
           log('TG','detected YES | platform='+(tg.platform||'unknown')+' ver='+(tg.version||'?'));
-          // діагностика initData
-          const initLen = (tg.initData || '').length;
-          const userId  = tg.initDataUnsafe?.user?.id || 'none';
-          log('TG',`initData.len=${initLen} user=${userId}`);
+          log('TG','initData.len=' + ((tg.initData||'').length||0) + ' user=' + (tg.initDataUnsafe?.user?.id || 'none'));
           return tg;
         }
       }catch(e){ log('TG','error '+(e.message||e)); }
-      log('TG','detected NO');
-      return null;
+      log('TG','detected NO'); return null;
     }
     let TG = null;
 
-    // антидубль
+    // Антидубль
     let lastSent = { value:'', at:0 };
     function shouldSend(v){
       const n=Date.now();
@@ -102,13 +101,35 @@
       lastSent={value:v,at:n}; return true;
     }
 
-    function uiConfirm(text){
+    // Показ системної Telegram MainButton для ручної відправки
+    function showMainButton(code){
       try{
-        if (TG?.showPopup) TG.showPopup({title:"Сканер", message:text, buttons:[{type:"close"}]});
-        else status(text);
-      }catch(_){}
+        TG.MainButton.setParams({text:`Надіслати: ${String(code).slice(0,28)}`});
+        TG.MainButton.show();
+        TG.offEvent?.('mainButtonClicked');
+        TG.onEvent?.('mainButtonClicked', () => {
+          const payload = JSON.stringify({action:'handleScan', code:String(code||'')});
+          log('SEND','MainButton sendData ' + payload);
+          TG.sendData?.(payload);
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 1200);
+        });
+      }catch(e){ log('MB','err '+(e.message||e)); }
     }
 
+    // Резервна кнопка на самій сторінці (якщо TG.MainButton нема)
+    function showFallbackButton(code){
+      const btn = $('#fallbackBtn');
+      btn.textContent = `Надіслати: ${String(code).slice(0,28)}`;
+      btn.style.display = 'block';
+      btn.onclick = () => {
+        const payload = JSON.stringify({action:'handleScan', code:String(code||'')});
+        log('SEND','FallbackBtn sendData ' + payload);
+        TG?.sendData?.(payload);
+        setTimeout(()=>{ try{ TG?.close?.(); }catch(_){ } }, 1200);
+      };
+    }
+
+    // Надсилання (авто + ручні фоли)
     async function sendToBot(code){
       try{
         if(!shouldSend(code)) return;
@@ -116,29 +137,37 @@
         status(`Знайдено: ${code} → надсилаю…`);
 
         TG = TG || getTG();
-        if (!TG){
+        if(!TG){
           status('Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.');
           return;
         }
 
+        // Розгорнути WebApp + уможливити MainButton
+        try { TG.expand?.(); TG.MainButton?.enable?.(); } catch(_){}
+
         TG.HapticFeedback?.impactOccurred?.('light');
 
-        // iOS-safe: пауза перед sendData + довша пауза перед close()
+        // 1) Автовідправка з iOS-паузами
         setTimeout(()=>{
-          const payload = JSON.stringify({ action:'handleScan', code:String(code||'') });
-          log('SEND','sendData ' + payload);
+          const payload = JSON.stringify({action:'handleScan', code:String(code||'')});
+          log('SEND','auto sendData ' + payload);
           TG.sendData?.(payload);
 
+          // 2) Через 700мс показати ручну кнопку (на випадок, якщо авто не дійшло)
           setTimeout(()=>{
-            try { TG.close?.(); } catch(_){ log('TG','close() not available'); }
-            uiConfirm('✅ Надіслано в бот');
-          }, 1200);
+            if (TG?.MainButton) showMainButton(code);
+            else showFallbackButton(code);
+          }, 700);
 
+          // 3) Закриття через 1.2с (iOS-safe)
+          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 1200);
         }, 200);
 
       }catch(e){
         log('SEND','err '+(e.message||e));
         status('Помилка надсилання');
+        // У будь-якому разі дати ручний варіант
+        if (TG?.MainButton) showMainButton(code); else showFallbackButton(code);
       }
     }
 
@@ -244,19 +273,15 @@
 
     (async()=>{
       try{
-        // 1) Telegram інтеграція
-        try { window.Telegram?.WebApp?.ready?.(); } catch(_) {}
+        window.Telegram?.WebApp?.ready?.();
         TG = getTG();
-
         if (!TG){
           status('Відкрийте через кнопку в Telegram (WebApp). Зараз сторінка запущена поза Telegram.');
           return;
         }
+        try { TG.expand?.(); TG.MainButton?.enable?.(); } catch(_){}
 
-        // 2) Камера
         await startCamera();
-
-        // 3) Детектори
         const okNative = await setupNative();
         if(okNative){ status('Скануйте… (native)'); requestAnimationFrame(loopScanNative); }
         else { status('Скануйте… (ZX core)'); loopScanZXcore(); }
