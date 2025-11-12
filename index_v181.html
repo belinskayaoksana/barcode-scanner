@@ -1,90 +1,125 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Scanner MWE — sendData</title>
+  <title>Smart Scanner — WebApp v2.0</title>
+
+  <!-- Анти-кеш -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
+
+  <!-- Telegram SDK -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- ZXing JS -->
+  <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+
   <style>
-    :root{color-scheme:dark}
-    html,body{height:100%} body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-    main{display:flex;flex-direction:column;gap:12px;padding:16px}
-    button{height:44px;border:none;border-radius:12px;font-weight:700;font-size:16px}
-    #sendBtn{background:#00a884;color:#fff}
-    #closeBtn{background:#222;color:#ddd}
-    pre{background:#0b0b0b;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;max-height:40vh;overflow:auto}
-    input{height:44px;border-radius:12px;border:1px solid #2a2a2a;background:#111;color:#fff;padding:0 12px;font-size:16px}
+    :root { color-scheme: dark }
+    html,body { margin:0; height:100%; background:#000; color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial }
+    main { position:relative; height:100%; overflow:hidden; }
+    video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000; }
+    #roi { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
+    #roi div { width:min(86vw,680px); height:min(40vh,340px); border:2px solid rgba(255,255,255,.9); border-radius:18px; box-shadow:0 0 0 200vmax rgba(0,0,0,.55) inset; }
+    #status { position:absolute; top:12px; left:12px; right:12px; background:#111; border:1px solid #2c2c2c; border-radius:10px; padding:6px 10px; font-size:14px; text-align:center; }
+    #tag { position:absolute; bottom:12px; left:12px; font-size:12px; opacity:.85; background:#111; border:1px solid #2c2c2c; border-radius:999px; padding:4px 10px; }
+    #fallback { position:absolute; left:12px; right:12px; bottom:12px; height:48px; background:#00a884; border:none; border-radius:12px; color:#fff; font-weight:700; font-size:16px; display:none; z-index:1000; }
+    pre { position:absolute; right:12px; bottom:70px; width:min(92vw,560px); max-height:42vh; overflow:auto; background:#0b0b0b; opacity:.92; border:1px solid #2a2a2a; border-radius:12px; padding:8px; font:12px/1.35 ui-monospace,Menlo,Consolas,monospace }
   </style>
 </head>
 <body>
   <main>
-    <h3>Scanner MWE</h3>
+    <video id="video" autoplay playsinline webkit-playsinline muted></video>
+    <div id="roi"><div></div></div>
     <div id="status">Ініціалізація…</div>
-    <input id="code" placeholder="Тестовий код (впиши або підставимо зі сканера)" />
-    <div style="display:flex; gap:12px;">
-      <button id="sendBtn">Надіслати у бот</button>
-      <button id="closeBtn">Закрити</button>
-    </div>
+    <div id="tag">Smart Scanner v2.0</div>
     <pre id="log"></pre>
+    <button id="fallback">Надіслати у бот</button>
   </main>
 
   <script>
     const $ = s => document.querySelector(s);
-    const log = (tag, msg) => {
-      const line = `[${new Date().toLocaleTimeString()}] ${tag}: ${msg}`;
-      console.log(line);
-      const el = $('#log'); el.textContent = (el.textContent + "\n" + line).slice(-8000);
-    };
-    const status = (m) => { $('#status').textContent = m; log('STATUS', m); };
+    const log = (t,m)=>{const el=$('#log');const line=`[${new Date().toLocaleTimeString()}] ${t}: ${m}`;console.log(line);el.textContent=(el.textContent+"\n"+line).slice(-6000);}
+    const status=m=>{$('#status').textContent=m;log('STATUS',m)}
 
-    // helper
+    let TG=null, lastCode='', detector=null, manualMode=false;
+
     function getTG(){
       try{
-        const tg = window.Telegram?.WebApp || window.parent?.Telegram?.WebApp || window.opener?.Telegram?.WebApp;
-        if (tg){
-          try{ tg.ready?.(); }catch(_){}
-          log('TG', 'detected YES | platform='+(tg.platform||'?'));
-          log('TG', 'initData.len=' + ((tg.initData||'').length||0) + ' user=' + (tg.initDataUnsafe?.user?.id || 'none'));
+        const tg=window.Telegram?.WebApp||window.parent?.Telegram?.WebApp||window.opener?.Telegram?.WebApp;
+        if(tg){try{tg.ready?.();}catch(_){};
+          log('TG','YES | platform='+(tg.platform||'?')+' user='+(tg.initDataUnsafe?.user?.id||'none'));
           return tg;
         }
-      }catch(e){ log('TG','err '+(e.message||e)); }
-      log('TG','detected NO'); return null;
+      }catch(e){log('TG','err '+e.message);}
+      log('TG','NO');return null;
     }
 
-    let TG = null;
+    async function startCamera(){
+      const video=$('#video');
+      const devices=await navigator.mediaDevices.enumerateDevices();
+      const back=devices.find(d=>/back|rear|environment/i.test(d.label));
+      const constraints={video:back?{deviceId:{exact:back.deviceId}}:{facingMode:'environment'}};
+      try{
+        const stream=await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject=stream;await video.play();
+        status('Камера запущена, наведи на код…');
+      }catch(e){status('Помилка доступу до камери: '+e.message);}
+    }
 
-    async function sendToBotManual(){
-      TG = TG || getTG();
-      if (!TG){ status('❗ Відкрий через кнопку в Telegram (WebApp). Зараз сторінка поза Telegram.'); return; }
-      const val = String($('#code').value || '').trim();
-      if (!val){ status('Введи код у поле (для тесту)'); return; }
+    async function setupDetector(){
+      if(!('BarcodeDetector' in window)) return false;
+      const formats=await BarcodeDetector.getSupportedFormats();
+      detector=new BarcodeDetector({formats});
+      return true;
+    }
 
-      const payload = JSON.stringify({ action:'handleScan', code: val, _debug_ts: Date.now() });
-      log('SEND', 'sendData ' + payload);
+    async function loopScan(){
+      if(!detector) return;
+      try{
+        const video=$('#video');
+        const codes=await detector.detect(video);
+        if(codes?.length){
+          const val=(codes[0].rawValue||'').trim();
+          if(val && val!==lastCode){
+            lastCode=val; status(`📦 Код: ${val}`);
+            sendToBot(val);
+          }
+        }
+      }catch(e){/* ignore */}
+      requestAnimationFrame(loopScan);
+    }
+
+    function showManualButton(code){
+      const b=$('#fallback');
+      b.textContent='Надіслати у бот: '+String(code).slice(0,24);
+      b.style.display='block';
+      b.onclick=()=>sendToBot(code,true);
+    }
+
+    function sendToBot(code,manual=false){
+      TG=TG||getTG();
+      if(!TG){status('❗ Відкрий через кнопку Telegram WebApp');return;}
+      const payload=JSON.stringify({action:'handleScan',code:String(code||''),_debug_ts:Date.now()});
       try{
         TG.HapticFeedback?.impactOccurred?.('light');
         TG.sendData?.(payload);
-        status('Відправлено через sendData (перевір чат) — WebApp НЕ закриваю.');
-        // TG.close?.(); // не закриваємо, щоб бачити ефект
-      }catch(e){
-        status('Помилка TG.sendData: ' + (e.message||e));
-        log('SEND','err '+(e.message||e));
+        log('SEND','sent '+payload);
+        status('✅ Відправлено у бот. Перевір чат.');
+      }catch(e){status('Помилка sendData: '+e.message);log('SEND','err '+e.message);}
+      if(!manual){
+        setTimeout(()=>{showManualButton(code);},800); // показати ручну після авто
       }
     }
 
-    (function init(){
-      TG = getTG();
-      if (!TG){
-        status('❗ Відкрий через кнопку в Telegram (WebApp).');
-      }else{
-        try{ TG.expand?.(); TG.MainButton?.enable?.(); }catch(_){}
-        status('Готово. Введи код і натисни "Надіслати у бот".');
-      }
-      $('#sendBtn').onclick = sendToBotManual;
-      $('#closeBtn').onclick = () => { try{ TG?.close?.(); }catch(_){ window.close(); } };
+    (async()=>{
+      TG=getTG();
+      if(!TG){status('❗ Відкрий через кнопку бота');return;}
+      try{TG.expand?.();TG.MainButton?.enable?.();}catch(_){}
+      await startCamera();
+      const ok=await setupDetector();
+      if(ok){status('Скануй код...');loopScan();}else{status('BarcodeDetector не підтримується');}
     })();
   </script>
 </body>
