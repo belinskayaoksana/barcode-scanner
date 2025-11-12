@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Ultra-Fast Scanner — 1D + QR (v1.9 iOS-safe + Manual send)</title>
+  <title>Ultra-Fast Scanner — 1D + QR (v2.0 iOS-safe + Manual send)</title>
 
   <!-- Анти-кеш для WebView -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -32,7 +32,7 @@
     #fallbackBtn{
       position:fixed;left:12px;right:12px;bottom:12px;height:44px;border-radius:12px;
       background:#00a884;color:#fff;border:none;font-weight:600;font-size:16px;
-      display:none;
+      display:none; z-index:9999;
     }
   </style>
 </head>
@@ -41,14 +41,14 @@
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація…</div>
-    <div id="tag">Ultra-Fast Scanner v1.9</div>
+    <div id="tag">Ultra-Fast Scanner v2.0</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
     <button id="fallbackBtn">Надіслати</button>
   </main>
 
   <script>
-    const VERSION = '1.9';
+    const VERSION = '2.0';
     const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
 
@@ -62,7 +62,7 @@
       const el=$('#log');
       const line = `[${new Date().toLocaleTimeString()}] ${tag}: ${msg}`;
       console.log(line);
-      el.textContent = (el.textContent+"\n"+line).slice(-6000);
+      el.textContent = (el.textContent+"\n"+line).slice(-8000);
     }
 
     // Анти-кеш
@@ -93,8 +93,11 @@
     }
     let TG = null;
 
-    // Антидубль
+    // Антидубль + керування автозакриттям
     let lastSent = { value:'', at:0 };
+    let autoCloseTimer = null;
+    let manualMode = false;
+
     function shouldSend(v){
       const n=Date.now();
       if(v===lastSent.value && (n-lastSent.at)<6000) return false;
@@ -104,6 +107,8 @@
     // Показ системної Telegram MainButton для ручної відправки
     function showMainButton(code){
       try{
+        manualMode = true;
+        if (autoCloseTimer) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
         TG.MainButton.setParams({text:`Надіслати: ${String(code).slice(0,28)}`});
         TG.MainButton.show();
         TG.offEvent?.('mainButtonClicked');
@@ -118,6 +123,8 @@
 
     // Резервна кнопка на самій сторінці (якщо TG.MainButton нема)
     function showFallbackButton(code){
+      manualMode = true;
+      if (autoCloseTimer) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
       const btn = $('#fallbackBtn');
       btn.textContent = `Надіслати: ${String(code).slice(0,28)}`;
       btn.style.display = 'block';
@@ -142,7 +149,7 @@
           return;
         }
 
-        // Розгорнути WebApp + уможливити MainButton
+        // Розгорнути WebApp + дозволити MainButton
         try { TG.expand?.(); TG.MainButton?.enable?.(); } catch(_){}
 
         TG.HapticFeedback?.impactOccurred?.('light');
@@ -159,8 +166,12 @@
             else showFallbackButton(code);
           }, 700);
 
-          // 3) Закриття через 1.2с (iOS-safe)
-          setTimeout(()=>{ try{ TG.close?.(); }catch(_){ log('TG','close() not available'); } }, 1200);
+          // 3) Закриття через 1.2с (але тільки якщо не увійшли в ручний режим)
+          autoCloseTimer = setTimeout(()=>{
+            if (!manualMode) {
+              try{ TG.close?.(); }catch(_){ log('TG','close() not available'); }
+            }
+          }, 1200);
         }, 200);
 
       }catch(e){
