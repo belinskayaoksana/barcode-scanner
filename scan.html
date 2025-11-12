@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Ultra‑Fast Scanner — Code‑39 + QR (v1.4 debug)</title>
+  <title>Ultra‑Fast Scanner — 1D + QR (v1.5 core‑ZXing, ROI, debug)</title>
   <!-- Force fresh load to avoid Telegram WebView cache -->
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
 
-  <!-- ZXing UMD (no dynamic imports; CORS‑safe) -->
+  <!-- ZXing UMD (core). We use core decode() via canvas/ROI to avoid CORS + browser helper deps -->
   <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
 
   <style>
@@ -17,34 +17,34 @@
     html,body{height:100%}
     body{margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
     #stage{position:fixed;inset:0;overflow:hidden;background:#000}
-    /* ВІДКЛЮЧИЛИ дзеркало (було scaleX(-1)) */
     #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
     #mask{position:absolute;inset:0;pointer-events:none;display:grid;place-items:center}
-    #roi{width:min(84vw,640px);height:min(38vh,320px);outline:2px solid rgba(255,255,255,.85);border-radius:18px;box-shadow:0 0 0 200vmax rgba(0,0,0,.55) inset}
-    #tag{position:absolute;left:12px;bottom:12px;font-size:12px;opacity:.8;background:#111;border:1px solid #2c2c2c;border-radius:999px;padding:4px 10px}
+    #roi{width:min(86vw,680px);height:min(40vh,340px);outline:2px solid rgba(255,255,255,.9);border-radius:18px;box-shadow:0 0 0 200vmax rgba(0,0,0,.55) inset}
+    #tag{position:absolute;left:12px;bottom:12px;font-size:12px;opacity:.85;background:#111;border:1px solid #2c2c2c;border-radius:999px;padding:4px 10px}
     #status{position:absolute;top:12px;left:12px;right:12px;font-size:13px;background:#111;border:1px solid #2c2c2c;border-radius:10px;padding:6px 10px;max-width:100%}
     #canvas{display:none}
-    #log{position:absolute;right:12px;bottom:48px;width:min(92vw,520px);max-height:40vh;overflow:auto;background:#0b0b0b;opacity:.9;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace}
+    #log{position:absolute;right:12px;bottom:48px;width:min(92vw,560px);max-height:42vh;overflow:auto;background:#0b0b0b;opacity:.92;border:1px solid #2a2a2a;border-radius:12px;padding:8px;font:12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace}
   </style>
 </head>
 <body>
   <main id="stage">
-    <!-- iOS needs these to auto‑play camera in WebView -->
     <video id="video" playsinline webkit-playsinline autoplay muted></video>
     <div id="mask"><div id="roi"></div></div>
     <div id="status">Ініціалізація камери…</div>
-    <div id="tag">Ultra‑Fast Scanner v1.4</div>
+    <div id="tag">Ultra‑Fast Scanner v1.5</div>
     <pre id="log"></pre>
     <canvas id="canvas"></canvas>
   </main>
 
   <script>
-    const VERSION = '1.4';
-    const INVENTORY_API_URL = ""; // ваш бекенд або Apps Script URL (якщо НЕ відкриваєте через Telegram WebApp)
-    const API_TOKEN = "";         // опціонально, якщо потрібна авторизація на бекенді
-    const SCAN_INTERVAL_MS = 120;
+    const VERSION = '1.5';
+    const INVENTORY_API_URL = ""; // бекенд / Apps Script, якщо НЕ відкрито як Telegram WebApp
+    const API_TOKEN = "";
+    const SCAN_INTERVAL_MS = 110;
     const VIBRATE_MS = 20;
-    const BARCODE_FORMATS = [
+
+    // Підтримувані формати для нативного детектора (якщо є)
+    const BARCODE_FORMATS_NATIVE = [
       'qr_code','code_39','code_93','code_128','ean_13','ean_8','upc_a','upc_e','itf','codabar','data_matrix','pdf417'
     ];
 
@@ -54,31 +54,30 @@
       const el=$('#log');
       const line = `[${new Date().toLocaleTimeString()}] ${tag}: ${msg}`;
       console.log(line);
-      el.textContent = (el.textContent+"\n"+line).slice(-4000);
+      el.textContent = (el.textContent+"\n"+line).slice(-5000);
     }
 
-    // ---- CACHE BUSTERS (ServiceWorker + Caches API + localStorage hint) ----
+    // ---- Жорстке очищення SW/caches, щоб версия підтялась ----
     (async()=>{
       try{
         if('serviceWorker' in navigator){
           const regs = await navigator.serviceWorker.getRegistrations();
-          for(const r of regs){ await r.unregister(); log('CACHE','ServiceWorker unregistered'); }
+          for(const r of regs){ await r.unregister(); log('CACHE','SW unregistered'); }
         }
         if('caches' in window){
-          const keys = await caches.keys();
-          for(const k of keys){ await caches.delete(k); log('CACHE', `Cache deleted: ${k}`); }
+          for(const k of await caches.keys()){ await caches.delete(k); log('CACHE',`cache deleted: ${k}`); }
         }
         localStorage.setItem('scanner_version', VERSION);
-      }catch(e){ log('CACHE','skip: '+(e.message||e)); }
+      }catch(e){ log('CACHE','skip '+(e.message||e)); }
     })();
 
     let lastSent = { value: '', at: 0 };
-    function shouldSend(v){const n=Date.now();if(v===lastSent.value&&(n-lastSent.at)<4000)return!1;lastSent={value:v,at:n};return!0}
+    function shouldSend(v){ const n=Date.now(); if(v===lastSent.value && (n-lastSent.at)<4000) return false; lastSent={value:v,at:n}; return true; }
 
     async function sendToBot(code){
       try{
-        if(!shouldSend(code))return;
-        if(navigator.vibrate)navigator.vibrate(VIBRATE_MS);
+        if(!shouldSend(code)) return;
+        navigator.vibrate?.(VIBRATE_MS);
         status(`Знайдено: ${code} → надсилаю…`);
         if(window?.Telegram?.WebApp){
           window.Telegram.WebApp.HapticFeedback?.impactOccurred?.('light');
@@ -87,15 +86,12 @@
           return;
         }
         if(INVENTORY_API_URL){
-          const body={action:'handleScan',source:'web_scanner',code};
-          const headers={'Content-Type':'application/json'};
-          if(API_TOKEN)headers['X-API-KEY']=API_TOKEN;
-          const r=await fetch(INVENTORY_API_URL,{method:'POST',headers,body:JSON.stringify(body)});
-          if(!r.ok)throw new Error('HTTP '+r.status);
-          status('Надіслано ✅');
-          setTimeout(()=>window.close(),300);
-        }else status('Немає підключення до бота або API URL');
-      }catch(e){console.error(e);status('Помилка надсилання: '+(e?.message||e))}
+          const headers={'Content-Type':'application/json'}; if(API_TOKEN) headers['X-API-KEY']=API_TOKEN;
+          const r=await fetch(INVENTORY_API_URL,{method:'POST',headers,body:JSON.stringify({action:'handleScan',source:'web_scanner',code})});
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          status('Надіслано ✅'); setTimeout(()=>window.close(),300);
+        } else status('Немає підключення до бота або API URL');
+      }catch(e){ log('SEND','err '+(e.message||e)); status('Помилка надсилання'); }
     }
 
     const video=$('#video');
@@ -106,158 +102,110 @@
       try{
         const dev=await navigator.mediaDevices.enumerateDevices();
         const vids=dev.filter(d=>d.kind==='videoinput');
-        log('DEVICES', JSON.stringify(vids.map(v=>({label:v.label, id:v.deviceId}))))
+        log('DEV', JSON.stringify(vids.map(v=>({label:v.label,id:v.deviceId}))))
         return vids;
-      }catch(e){ log('DEVICES','err '+(e.message||e)); return []; }
+      }catch(e){ log('DEV','err '+(e.message||e)); return []; }
     }
 
     async function chooseBackCamera(base){
       const vids=await enumerateCams();
       const back=vids.find(d=>/back|rear|зад|environment/i.test(d.label));
-      if(back){ log('CAM','use back: '+back.label); return { ...base, video: { ...base.video, deviceId: { exact: back.deviceId } } } }
-      log('CAM','no explicit back camera, use defaults');
-      return base
+      if(back){ log('CAM','use back '+back.label); return { ...base, video: { ...base.video, deviceId: { exact: back.deviceId } } } }
+      log('CAM','fallback default camera'); return base;
     }
 
     async function startCamera(){
-      if(!navigator.mediaDevices?.getUserMedia){status('Камера не підтримується');return null}
+      if(!navigator.mediaDevices?.getUserMedia){ status('Камера не підтримується'); return null; }
       video.muted=true; video.setAttribute('muted','');
-      let constraints={
-        audio:false,
-        video:{
-          facingMode:{ideal:'environment'},
-          width:{ideal:1920},
-          height:{ideal:1080},
-          frameRate:{ideal:30,max:60},
-          advanced:[{focusMode:'continuous'}]
-        }
-      };
+      let constraints={ audio:false, video:{ facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30,max:60}, advanced:[{focusMode:'continuous'}] } };
       try{
         constraints=await chooseBackCamera(constraints);
         log('GUM','constraints '+JSON.stringify(constraints.video||{}));
         const stream=await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject=stream;
-        await video.play();
-        status('Камера запущена — наведіть на код');
-        return stream;
-      }catch(err1){
-        log('GUM','primary failed: '+(err1?.name||err1));
+        video.srcObject=stream; await video.play(); status('Камера запущена — наведіть на код'); return stream;
+      }catch(e){
+        log('GUM','primary fail '+(e.name||e));
         try{
-          const fallbackStream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
-          video.srcObject=fallbackStream; video.muted=true;
-          await video.play();
-          status('Камера запущена (fallback) — скануйте');
-          return fallbackStream;
-        }catch(err2){
-          status('Камеру не вдалося запустити: '+(err2?.name||err2));
-          throw err2;
-        }
+          const s=await navigator.mediaDevices.getUserMedia({video:true,audio:false}); video.srcObject=s; await video.play(); status('Камера (fallback) — скануйте'); return s;
+        }catch(e2){ status('Камеру не вдалося запустити: '+(e2.name||e2)); throw e2; }
       }
     }
 
-    let useNative=false;let detector=null;let zxReader=null;
-    function setupDecoders(){
-      if('BarcodeDetector' in window){
-        try{
-          const Detector=window.BarcodeDetector;
-          if(Detector && Detector.getSupportedFormats){
-            Detector.getSupportedFormats().then(sup=>{
-              const formats=BARCODE_FORMATS.filter(f=>sup.includes(f));
-              log('Detector formats', JSON.stringify(formats));
-              if(formats.length){
-                detector=new Detector({formats});
-                useNative=true;
-              }
-            })
-          }
-        }catch(e){ log('Detector','not usable '+(e.message||e)); }
-      }
-      if(!useNative && window.ZXing){
-        try{
-          zxReader = new window.ZXing.BrowserMultiFormatReader();
-          // Хінти для кращого розпізнавання
-          const hints = new Map();
-          hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
-          hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-            window.ZXing.BarcodeFormat.QR_CODE,
-            window.ZXing.BarcodeFormat.CODE_39,
-            window.ZXing.BarcodeFormat.CODE_128,
-            window.ZXing.BarcodeFormat.EAN_13,
-            window.ZXing.BarcodeFormat.EAN_8,
-            window.ZXing.BarcodeFormat.UPC_A,
-            window.ZXing.BarcodeFormat.UPC_E,
-            window.ZXing.BarcodeFormat.ITF,
-            window.ZXing.BarcodeFormat.CODABAR,
-            window.ZXing.BarcodeFormat.DATA_MATRIX,
-            window.ZXing.BarcodeFormat.PDF_417
-          ]);
-          zxReader?.setHints?.(hints);
-          log('ZXing','initialized with hints');
-        }catch(e){ log('ZXing','init fail '+(e.message||e)); }
-      }
+    // --- Native detector first ---
+    let useNative=false, detector=null;
+    async function setupNative(){
+      if(!('BarcodeDetector' in window)) return false;
+      try{
+        const sup = (await window.BarcodeDetector.getSupportedFormats?.())||[];
+        const formats = BARCODE_FORMATS_NATIVE.filter(f=>sup.includes(f));
+        log('Native formats', JSON.stringify(formats));
+        if(!formats.length) return false;
+        detector = new window.BarcodeDetector({formats});
+        useNative = true; return true;
+      }catch(e){ log('Native','unavailable '+(e.message||e)); return false; }
     }
 
-    function drawFrameToCanvas(){
-      const vw=video.videoWidth,vh=video.videoHeight;
-      if(!vw||!vh) return null;
-      canvas.width=vw; canvas.height=vh;
-      ctx.drawImage(video,0,0,vw,vh);
-      return{w:vw,h:vh}
+    // --- ZXing core (UMD) via canvas ROI ---
+    function getRoiRect(vw, vh){
+      const rw=Math.floor(vw*0.86), rh=Math.floor(vh*0.40);
+      const rx=Math.floor((vw-rw)/2), ry=Math.floor((vh-rh)/2);
+      return {rx,ry,rw,rh};
+    }
+
+    function grabRoi(){
+      const vw=video.videoWidth, vh=video.videoHeight; if(!vw||!vh) return null;
+      const {rx,ry,rw,rh}=getRoiRect(vw,vh);
+      canvas.width=rw; canvas.height=rh; // малюємо лише ROI для швидкості
+      ctx.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
+      const imageData=ctx.getImageData(0,0,rw,rh);
+      return {imageData, rw, rh};
+    }
+
+    function tryDecodeZX(){
+      try{
+        const ZX = window.ZXing;
+        if(!ZX){ log('ZX','not loaded'); return null; }
+        const frame=grabRoi(); if(!frame) return null;
+        const {imageData, rw, rh}=frame;
+        // Перетворимо у масив яскравостей
+        const luminances = new Uint8ClampedArray(rw*rh);
+        for(let i=0,j=0; i<imageData.data.length; i+=4, j++) luminances[j]=imageData.data[i]; // беремо Red як люмінанс
+        const src = new ZX.RGBLuminanceSource(luminances, rw, rh);
+        const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(src));
+        const reader = new ZX.MultiFormatReader();
+        const hints = new Map();
+        hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+        reader.setHints?.(hints);
+        const result = reader.decode(bitmap);
+        if(result && result.getText){ return String(result.getText()).trim(); }
+        return null;
+      }catch(e){
+        // ZXing кидає NotFoundException коли коду нема — це нормально
+        return null;
+      }
     }
 
     async function loopScanNative(){
       try{
         const codes=await detector.detect(video);
-        if(codes?.length){
-          const val=(codes[0].rawValue||'').trim();
-          log('NATIVE','hit '+val);
-          if(val) return sendToBot(val);
-        }
+        if(codes?.length){ const val=(codes[0].rawValue||'').trim(); log('NATIVE','hit '+val); if(val) return sendToBot(val); }
       }catch(e){ log('NATIVE','err '+(e.message||e)); }
-      requestAnimationFrame(loopScanNative)
+      requestAnimationFrame(loopScanNative);
     }
 
-    async function loopScanZXing(){
-      if(!zxReader){ status('Помилка: ZXing не ініціалізовано'); return; }
-      try{
-        if(zxReader.decodeOnceFromVideoElement){
-          const res=await zxReader.decodeOnceFromVideoElement(video);
-          if(res?.text){ const code=res.text.trim(); log('ZX','once '+code); if(code) return sendToBot(code); }
-        }
-      }catch(e){ log('ZX','once miss '+(e.message||e)); }
-      const tick=async()=>{
-        try{
-          if(zxReader.decodeFromVideoElement){
-            const r=await zxReader.decodeFromVideoElement(video);
-            if(r?.text){ const code=r.text.trim(); log('ZX','loop '+code); if(code) return sendToBot(code); }
-          }else{
-            drawFrameToCanvas();
-            const r=await zxReader.decodeFromCanvas(canvas);
-            if(r?.text){ const code=r.text.trim(); log('ZX','canvas '+code); if(code) return sendToBot(code); }
-          }
-        }catch(e){ /* очікувані промахи */ }
-        setTimeout(tick, SCAN_INTERVAL_MS);
-      };
-      tick();
+    function loopScanZXcore(){
+      const code = tryDecodeZX();
+      if(code){ log('ZX','hit '+code); return sendToBot(code); }
+      setTimeout(loopScanZXcore, SCAN_INTERVAL_MS);
     }
 
     (async()=>{
       try{
-        setupDecoders();
         await startCamera();
-        setTimeout(()=>{
-          if(useNative && detector){
-            status('Скануйте… (native)');
-            requestAnimationFrame(loopScanNative)
-          }else{
-            status('Скануйте… (ZXing)');
-            loopScanZXing()
-          }
-        }, 100);
-      }catch(e){
-        console.error(e);
-        status('Помилка запуску: '+(e?.name||e?.message||e))
-      }
+        const okNative = await setupNative();
+        if(okNative){ status('Скануйте… (native)'); requestAnimationFrame(loopScanNative); }
+        else { status('Скануйте… (ZX core)'); loopScanZXcore(); }
+      }catch(e){ status('Помилка запуску: '+(e?.name||e?.message||e)); }
     })();
   </script>
 </body>
